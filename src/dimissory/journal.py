@@ -78,12 +78,36 @@ def declare(session, field, value, root=None, now=None):
     line = json.dumps({"ts": now if now is not None else time.time(),
                        "field": field, "value": text},
                       ensure_ascii=True) + "\n"
-    # O_APPEND, one write, one line. The kernel serialises appends under
-    # PIPE_BUF so concurrent hooks interleave whole lines rather than tearing
-    # one. Asserted in tests/test_journal.py with real processes.
-    with open(p, "a", encoding="utf-8") as fh:
-        fh.write(line)
-        fh.flush()
+    # ONE os.write() of encoded bytes to a fd opened O_APPEND. The earlier
+    # version used text mode and justified itself with PIPE_BUF, and review was
+    # right that both halves were wrong:
+    #
+    #   PIPE_BUF is a PIPE guarantee (512 on macOS, 4096 on Linux). It says
+    #   nothing about regular files.
+    #
+    #   Python text mode buffers, so `fh.write(line)` is not one write() call
+    #   and may be split wherever the buffer happens to fill.
+    #
+    # The 480/480 result the first version measured was luck, not a property.
+    # A single small write() to an O_APPEND descriptor is the strongest
+    # portable guarantee available without a lock file: the offset update and
+    # the write are one operation, so concurrent hooks interleave whole lines.
+    # It is still not unbounded -- a very large entry can tear -- which is why
+    # `read` treats an unterminated final line as a write in flight rather than
+    # as corruption.
+    data = line.encode("utf-8")
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        written = os.write(fd, data)
+        if written != len(data):
+            # A short write is not a crash and must not be silent: the entry is
+            # now half in the file, and the reader will drop it. Saying so is
+            # the difference between a lost declaration and an unexplained one.
+            raise JournalError(
+                f"short write to {p}: {written} of {len(data)} bytes. The "
+                f"entry was not recorded intact.")
+    finally:
+        os.close(fd)
     return p
 
 

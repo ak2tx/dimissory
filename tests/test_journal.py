@@ -42,6 +42,24 @@ def _root():
     return tempfile.mkdtemp(prefix="dim-journal-")
 
 
+def test_the_append_is_one_syscall_not_a_buffered_write():
+    """Review corrected the mechanism, so the mechanism is asserted.
+
+    The first version opened the file in text mode and justified itself with
+    PIPE_BUF. Both halves were wrong -- PIPE_BUF is a pipe guarantee and Python
+    text mode buffers -- so the test that passed was measuring luck.
+    """
+    src = open(os.path.join(ROOT, "src", "dimissory", "journal.py")).read()
+    body = src[src.index("def declare"):src.index("def read")]
+    check("declare uses os.write, not a buffered file object",
+          "os.write(" in body, "no os.write")
+    check("on a descriptor opened O_APPEND", "O_APPEND" in body)
+    check("and a short write is raised, not swallowed",
+          "short write" in body)
+    check("the false PIPE_BUF justification is gone",
+          "PIPE_BUF" not in body or "wrong" in body.lower(), "still claimed")
+
+
 def test_concurrent_processes_do_not_lose_or_tear_a_line():
     """The reason for append-only, asserted with real processes.
 
@@ -51,12 +69,17 @@ def test_concurrent_processes_do_not_lose_or_tear_a_line():
     the point: this is the assumption most likely to differ on Windows.
     """
     root = _root()
-    n, per = 12, 40
+    # Bigger payloads than the first version used. Review: PIPE_BUF is a pipe
+    # guarantee (512 on macOS, 4096 on Linux) and says nothing about regular
+    # files, and Python text mode buffers so a write is not one syscall. The
+    # original 480/480 was luck. 200-byte entries exercise the real path: one
+    # os.write() to an O_APPEND descriptor.
+    n, per = 16, 60
     prog = ("import sys; sys.path.insert(0, %r)\n"
             "from dimissory.journal import declare\n"
             "w = sys.argv[1]\n"
             "for i in range(%d):\n"
-            "    declare('s', 'decided', 'worker-%%s-entry-%%d' %% (w, i), root=%r)\n"
+            "    declare('s', 'decided', 'worker-%%s-entry-%%d-' %% (w, i) + 'x'*200, root=%r)\n"
             % (os.path.join(ROOT, "src"), per, root))
     procs = [subprocess.Popen([sys.executable, "-c", prog, str(w)])
              for w in range(n)]
@@ -245,7 +268,8 @@ def main():
     print("=" * 64)
     print(" the agent declares as it works; the trigger only seals it")
     print("=" * 64)
-    for t in (test_concurrent_processes_do_not_lose_or_tear_a_line,
+    for t in (test_the_append_is_one_syscall_not_a_buffered_write,
+              test_concurrent_processes_do_not_lose_or_tear_a_line,
               test_current_fields_replace_and_accumulating_fields_do_not,
               test_an_undeclared_field_has_no_age_rather_than_a_zero,
               test_a_damaged_line_is_skipped_and_counted_not_guessed_at,
