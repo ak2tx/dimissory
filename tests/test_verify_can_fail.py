@@ -163,7 +163,8 @@ def test_a_check_with_no_recorded_expectation_is_not_a_pass():
               declared=Declared(task="t"),
               checks=(Check("true", "whatever"),))
     text = render(b).replace("#   expected: whatever", "")   # strip it
-    with open(os.path.join(letters, "s-1.md"), "w") as fh:
+    with open(os.path.join(letters, "s-1.md"), "w",
+              encoding="utf-8") as fh:
         fh.write(text)
     rc, out = _resume(letters)
     check("a check with nothing to compare is NOT a pass", rc == 2, f"exit {rc}")
@@ -176,7 +177,8 @@ def test_a_letter_with_no_verify_block_is_refused():
     os.makedirs(letters)
     b = Brief(session="s", observed=Observed(head="abc1234"),
               declared=Declared(task="t"), checks=())
-    with open(os.path.join(letters, "s-1.md"), "w") as fh:
+    with open(os.path.join(letters, "s-1.md"), "w",
+              encoding="utf-8") as fh:
         fh.write(render(b))
     rc, out = _resume(letters)
     check("an unverifiable letter cannot 'hold'", rc == 2, f"exit {rc}")
@@ -236,6 +238,49 @@ def test_checks_run_without_a_shell():
           "'" not in argv[-1] and '"' not in argv[-1], argv[-1])
 
 
+def test_a_letter_that_is_not_valid_utf8_is_reported_not_raised():
+    """A letter arrives from another machine. It may not be well-formed.
+
+    `open(p, encoding="utf-8").read()` turned that into a traceback. Found on
+    Windows, where a cp1252 em-dash is byte 0x97 -- written by this suite's own
+    test, which had opened the file without an encoding. The test bug was real
+    and so was the gap it exposed: the tool must survive someone else's bytes.
+    """
+    d = tempfile.mkdtemp(prefix="dim-enc-")
+    letters = os.path.join(d, "letters")
+    os.makedirs(letters)
+    b = Brief(session="s", observed=Observed(head="abc1234"),
+              declared=Declared(task="t"),
+              checks=(Check("git rev-parse --short HEAD", "abc1234"),))
+    # cp1252 bytes: exactly what an editor on Windows would save.
+    with open(os.path.join(letters, "s-1.md"), "wb") as fh:
+        fh.write(render(b).encode("utf-8") + b"\n\nnote: caf\xe9 \x97 dash\n")
+    rc, out = _resume(letters)
+    check("an undecodable letter does not raise", isinstance(rc, int), rc)
+    check("it is reported as not valid UTF-8", "not valid UTF-8" in out, out[-240:])
+    check("and the tool still reaches a verdict rather than dying",
+          rc in (0, 2), rc)
+
+
+def test_the_letter_is_plain_ascii():
+    """A document that crosses machines should not depend on an encoding.
+
+    The renderer used em-dashes and arrows. They were style, and they cost a
+    platform: the first Windows failure was a non-ASCII character surviving a
+    round trip through the wrong default encoding. ASCII removes the class.
+    """
+    b = Brief(session="s",
+              observed=Observed(head="abc1234", dirty=("a.py",)),
+              declared=Declared(task="t", decided=("d",), next_action="n"),
+              checks=(Check("git status", "clean"),))
+    for label, text in (("a full letter", render(b)),
+                        ("a degraded one", render(Brief(
+                            session="s", observed=Observed(head="a"),
+                            declared=Declared(), checks=())))):
+        bad = sorted({c for c in text if ord(c) > 127})
+        check(f"{label} is pure ASCII", not bad, f"non-ASCII: {bad}")
+
+
 def main_():
     print("=" * 66)
     print(" the verify block fails when the world moved, or it is decoration")
@@ -246,7 +291,9 @@ def main_():
               test_a_check_with_no_recorded_expectation_is_not_a_pass,
               test_a_letter_with_no_verify_block_is_refused,
               test_the_exclusion_survives_a_symlinked_working_directory,
-              test_checks_run_without_a_shell):
+              test_checks_run_without_a_shell,
+              test_a_letter_that_is_not_valid_utf8_is_reported_not_raised,
+              test_the_letter_is_plain_ascii):
         t()
     print("\n" + "=" * 66)
     print(f" {'PASS' if not FAILED else 'FAIL'} {RAN - len(FAILED)}/{RAN}"

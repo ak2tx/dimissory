@@ -25,6 +25,33 @@ from .render import render
 DEFAULT_DIR = os.path.expanduser("~/.dimissory/letters")
 
 
+def _read_letter(path):
+    """A letter's text, or (None, why). Never raises on someone else's bytes.
+
+    A letter is a portable document that arrives from another machine. It may
+    have been re-saved by an editor with a different default encoding, mailed
+    through something lossy, or truncated. `open(p, encoding="utf-8").read()`
+    turned all of that into a traceback -- on Windows, where a cp1252 em-dash
+    is byte 0x97, which is not valid UTF-8.
+
+    UTF-8 first because that is what dimissory writes. The fallback decodes
+    with replacement and SAYS SO, because silently substituting characters in a
+    document whose verify block is compared byte-for-byte would turn a
+    corrupted letter into a stale one, and those are different findings.
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as e:
+        return None, f"cannot be read: {e}"
+    try:
+        return raw.decode("utf-8"), None
+    except UnicodeDecodeError as e:
+        return (raw.decode("utf-8", "replace"),
+                f"not valid UTF-8 ({e.reason} at byte {e.start}); decoded with "
+                f"replacement, so any check may disagree for that reason alone")
+
+
 def _letters_dir(args):
     """--dir, then the config, then the default. In that order, and it is worth
     saying out loud: the predecessor had a hook that ignored `-c` entirely and
@@ -85,7 +112,13 @@ def cmd_show(args):
     if not p or not os.path.exists(p):
         print("no letter found", file=sys.stderr)
         return 1
-    sys.stdout.write(open(p, encoding="utf-8").read())
+    text, why = _read_letter(p)
+    if text is None:
+        print(f"{p}: {why}", file=sys.stderr)
+        return 1
+    if why:
+        print(f"{p}: {why}", file=sys.stderr)
+    sys.stdout.write(text)
     return 0
 
 
@@ -100,7 +133,12 @@ def cmd_resume(args):
     if not p or not os.path.exists(p):
         print("no letter found", file=sys.stderr)
         return 1
-    text = open(p, encoding="utf-8").read()
+    text, why = _read_letter(p)
+    if text is None:
+        print(f"{p}: {why}", file=sys.stderr)
+        return 2
+    if why:
+        print(f"{p}: WARNING -- {why}", file=sys.stderr)
     if "## Verify first" not in text:
         print(f"{p}: UNVERIFIABLE -- this letter carries no checks.",
               file=sys.stderr)

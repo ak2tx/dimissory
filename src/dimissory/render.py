@@ -66,7 +66,7 @@ def render(brief: Brief) -> str:
     # The banners go first, because they change how everything below is read.
     if brief.is_degraded:
         parts += [
-            "> **DEGRADED — the agent did not write its half.**",
+            "> **DEGRADED -- the agent did not write its half.**",
             "> Everything below is machine-derived. There is no task, no "
             "decision record and",
             "> no stated next action, because none was supplied before the "
@@ -75,7 +75,7 @@ def render(brief: Brief) -> str:
         ]
     if brief.is_unverifiable:
         parts += [
-            "> **UNVERIFIABLE — this letter carries no checks.**",
+            "> **UNVERIFIABLE -- this letter carries no checks.**",
             "> Nothing here can be confirmed against the current state of the "
             "world. Treat it",
             "> as a claim, not a finding.",
@@ -85,7 +85,7 @@ def render(brief: Brief) -> str:
     if brief.checks:
         parts += ["## Verify first", "",
                   "Run these before acting. If any disagrees, the world moved "
-                  "after this letter was\nwritten and it is STALE — re-derive "
+                  "after this letter was\nwritten and it is STALE -- re-derive "
                   "rather than continue.", "", "```"]
         for c in brief.checks:
             if c.why:
@@ -96,22 +96,22 @@ def render(brief: Brief) -> str:
 
     if not d.is_empty():
         if d.task:
-            parts += [f"## Task — {_ATTRIB}", "", d.task, ""]
+            parts += [f"## Task -- {_ATTRIB}", "", d.task, ""]
         if d.decided:
-            parts += [f"## Decided — {_ATTRIB}", ""]
+            parts += [f"## Decided -- {_ATTRIB}", ""]
             parts += [f"- {x}" for x in d.decided] + [""]
         if d.ruled_out:
-            parts += [f"## Ruled out — {_ATTRIB}", ""]
+            parts += [f"## Ruled out -- {_ATTRIB}", ""]
             parts += [f"- {x}" for x in d.ruled_out] + [""]
         if d.next_action:
-            parts += [f"## Next action — {_ATTRIB}", "", d.next_action, ""]
+            parts += [f"## Next action -- {_ATTRIB}", "", d.next_action, ""]
         if d.constraints:
-            parts += [f"## Constraints — {_ATTRIB}", ""]
+            parts += [f"## Constraints -- {_ATTRIB}", ""]
             parts += [f"- {x}" for x in d.constraints] + [""]
 
     body = _lines(o)
     if body:
-        parts += ["## Observed — established by dimissory, not by the agent", "",
+        parts += ["## Observed -- established by dimissory, not by the agent", "",
                   "```"] + body + ["```", ""]
 
     parts += [
