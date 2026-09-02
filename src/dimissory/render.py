@@ -20,7 +20,38 @@ from __future__ import annotations
 
 from .brief import Brief, Unmeasured
 
-_ATTRIB = "the agent's own words, written before the window closed"
+_ATTRIB = "the agent's own words"
+
+# How old a declaration may be before it stops being presented as current.
+# PER FIELD, because they decay differently -- review was explicit about this:
+#
+#   next        a stale next action is the dangerous one. It reads as "do this
+#               now" while describing a world two hours gone.
+#   task        the same shape, but a task changes far less often.
+#   decided     age alone does not invalidate a decision. It is a historical
+#   ruled_out   assertion and stays true until revoked.
+#   constraint  effective until revoked.
+#
+# So only the CURRENT-state fields have a threshold at all. Wall-clock seconds
+# rather than "a fraction of the session", because session duration is unstable
+# and often unknowable -- a fraction of an unknown is not a threshold.
+STALE_AFTER = {"next": 45 * 60, "task": 4 * 60 * 60}
+
+
+def _age_phrase(seconds):
+    if seconds is None:
+        return ""
+    if seconds < 90:
+        return "declared just now"
+    if seconds < 3600:
+        return f"declared {int(seconds // 60)}m before sealing"
+    return f"declared {seconds / 3600:.1f}h before sealing"
+
+
+def is_stale(field, seconds):
+    """Whether a declared field is too old to present as current."""
+    limit = STALE_AFTER.get(field)
+    return limit is not None and seconds is not None and seconds > limit
 
 
 def _lines(observed) -> list:
@@ -64,6 +95,15 @@ def render(brief: Brief) -> str:
     parts.append("")
 
     # The banners go first, because they change how everything below is read.
+    if brief.has_stale_current_state:
+        parts += [
+            "> **STALE DECLARED STATE -- the plan below may not be current.**",
+            "> The agent declared a task or next action and then did not "
+            "update it. Those",
+            "> are under 'Stale declared state' rather than presented as "
+            "instructions.",
+            "",
+        ]
     if brief.is_degraded:
         parts += [
             "> **DEGRADED -- the agent did not write its half.**",
@@ -95,19 +135,45 @@ def render(brief: Brief) -> str:
         parts += ["```", ""]
 
     if not d.is_empty():
+        ages = brief.ages or {}
+        stale = []
+
+        def head(label, field):
+            phrase = _age_phrase(ages.get(field))
+            return f"## {label} -- {_ATTRIB}" + (f", {phrase}" if phrase else "")
+
         if d.task:
-            parts += [f"## Task -- {_ATTRIB}", "", d.task, ""]
+            if is_stale("task", ages.get("task")):
+                stale.append(("Task", d.task, ages.get("task")))
+            else:
+                parts += [head("Task", "task"), "", d.task, ""]
         if d.decided:
-            parts += [f"## Decided -- {_ATTRIB}", ""]
+            parts += [head("Decided", "decided"), ""]
             parts += [f"- {x}" for x in d.decided] + [""]
         if d.ruled_out:
-            parts += [f"## Ruled out -- {_ATTRIB}", ""]
+            parts += [head("Ruled out", "ruled_out"), ""]
             parts += [f"- {x}" for x in d.ruled_out] + [""]
         if d.next_action:
-            parts += [f"## Next action -- {_ATTRIB}", "", d.next_action, ""]
+            if is_stale("next", ages.get("next")):
+                stale.append(("Next action", d.next_action, ages.get("next")))
+            else:
+                parts += [head("Next action", "next"), "", d.next_action, ""]
         if d.constraints:
-            parts += [f"## Constraints -- {_ATTRIB}", ""]
+            parts += [head("Constraints", "constraint"), ""]
             parts += [f"- {x}" for x in d.constraints] + [""]
+
+        # Kept, but NOT under a heading that reads as an instruction. A stale
+        # next action presented as "Next action" is the failure mode: it says
+        # "do this now" about a world that has moved on.
+        if stale:
+            parts += ["## Stale declared state -- NOT current", "",
+                      "The agent declared these and then did not update them. "
+                      "They are recorded\nbecause they are evidence, and "
+                      "withheld from the sections above because\nacting on "
+                      "them directly would be acting on a stale plan.", ""]
+            for label, value, secs in stale:
+                parts += [f"- **{label}** ({_age_phrase(secs)}): {value}"]
+            parts += [""]
 
     body = _lines(o)
     if body:

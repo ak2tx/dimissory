@@ -67,21 +67,36 @@ def cmd_write(args):
     o = observe(cwd=cwd, transcript=args.transcript)
     from .observe import _exclude_pathspec, _git
     _d = _letters_dir(args)
-    _spec = _exclude_pathspec(cwd, _d)
+    _j = os.path.expanduser(args.journal or "~/.dimissory/journal")
+    _ours = (_d, _j)
+    _spec = _exclude_pathspec(cwd, *_ours)
     # The recorded output must come from the SAME command the letter asks the
     # reader to run, exclusions included, or the two can never agree.
-    _rel = (os.path.relpath(os.path.realpath(_d), os.path.realpath(cwd))
-            .replace(os.sep, "/")) if _spec else None
+    _rels = []
+    for _o in _ours:
+        try:
+            _r = os.path.relpath(os.path.realpath(_o), os.path.realpath(cwd))
+        except ValueError:
+            continue
+        if not _r.startswith(os.pardir) and not os.path.isabs(_r):
+            _rels.append(f":(exclude){_r.replace(os.sep, '/')}")
     _porcelain = _git(cwd, "status", "--porcelain",
-                      *(["--", f":(exclude){_rel}"] if _spec else []))
+                      *(["--", *_rels] if _rels else []))
+    session = args.session or os.path.basename(os.getcwd()) or "session"
+    # SEAL the journal rather than ask a question now. Both round-25 reviews
+    # made this correction: at the moment a letter is needed the agent has the
+    # least capacity to write one, so it declares as it works and the trigger
+    # only fixes what is already there.
+    from . import journal as _J
+    declared, ages, damaged = _J.to_declared(session, root=args.journal)
+    if damaged:
+        print(f"  journal: {damaged} unreadable entr(ies) skipped", file=sys.stderr)
     brief = Brief(
-        session=args.session or os.path.basename(os.getcwd()) or "session",
+        session=session,
         observed=o,
-        # Empty until the agent is asked for its half. The letter renders a
-        # DEGRADED banner in this state rather than looking finished, which is
-        # the whole reason that banner exists.
-        declared=Declared(),
-        checks=checks_for(o, cwd=cwd, letters_dir=_d,
+        declared=declared,
+        ages=ages,
+        checks=checks_for(o, cwd=cwd, our_dirs=_ours,
                           porcelain=_porcelain if isinstance(_porcelain, str)
                           else None),
     )
@@ -220,6 +235,33 @@ def cmd_resume(args):
     return 0
 
 
+def cmd_declare(args):
+    """Record what the agent knows, while it still has budget to know it."""
+    from . import journal as _J
+    session = args.session or os.path.basename(os.getcwd()) or "session"
+    wrote = []
+    for field, values in (("task", [args.task] if args.task else []),
+                          ("next", [args.next] if args.next else []),
+                          ("decided", args.decided or []),
+                          ("ruled_out", args.ruled_out or []),
+                          ("constraint", args.constraint or []),
+                          (_J.REVOKE, args.revoke or [])):
+        for v in values:
+            try:
+                _J.declare(session, field, v, root=args.journal)
+                wrote.append(field)
+            except _J.JournalError as e:
+                print(f"dim declare: {e}", file=sys.stderr)
+                return 1
+    if not wrote:
+        print("dim declare: nothing to record. Pass at least one of "
+              "--task/--next/--decided/--ruled-out/--constraint/--revoke",
+              file=sys.stderr)
+        return 1
+    print(f"recorded {len(wrote)}: {', '.join(sorted(set(wrote)))}")
+    return 0
+
+
 def cmd_setup(args):
     from .setup import run
     return run(config_path=args.config, assume_yes=True if args.yes else None)
@@ -272,6 +314,7 @@ def main(argv=None):
     p.add_argument("--version", action="version", version=f"dimissory {__version__}")
     p.add_argument("--dir", help=f"where letters live (default: {DEFAULT_DIR})")
     p.add_argument("-c", "--config", help="config file (default: ~/.dimissory/config.toml)")
+    p.add_argument("--journal", help="journal directory (default: ~/.dimissory/journal)")
     sub = p.add_subparsers(dest="cmd")
 
     w = sub.add_parser("write", help="issue a letter now")
@@ -286,6 +329,19 @@ def main(argv=None):
     r.add_argument("path", nargs="?"); r.set_defaults(fn=cmd_resume)
 
     sub.add_parser("status", help="plan-window usage").set_defaults(fn=cmd_status)
+
+    dc = sub.add_parser("declare", help="record what you know, as you work")
+    dc.add_argument("--session")
+    dc.add_argument("--task", help="what this session is for (replaces)")
+    dc.add_argument("--next", help="the exact next action (replaces)")
+    dc.add_argument("--decided", action="append", help="a decision (accumulates)")
+    dc.add_argument("--ruled-out", action="append", dest="ruled_out",
+                    help="a dead end and why (accumulates)")
+    dc.add_argument("--constraint", action="append",
+                    help="a standing constraint (accumulates)")
+    dc.add_argument("--revoke", action="append",
+                    help="retract an earlier entry, verbatim")
+    dc.set_defaults(fn=cmd_declare)
 
     su = sub.add_parser("setup", help="guided first-time setup")
     su.add_argument("--yes", action="store_true", help="take every default")

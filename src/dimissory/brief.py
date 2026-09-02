@@ -148,6 +148,10 @@ class Brief:
     observed: Observed
     declared: Declared
     checks: tuple = ()
+    # How long before sealing each declared field was last written, or None for
+    # one never declared. None rather than 0 for the same reason as everywhere
+    # else here: zero would read as "declared just now".
+    ages: dict = dataclasses.field(default_factory=dict)
 
     @property
     def is_degraded(self) -> bool:
@@ -159,6 +163,19 @@ class Brief:
         the banner rather than trusting the renderer to remember.
         """
         return self.declared.is_empty()
+
+    @property
+    def has_stale_current_state(self) -> bool:
+        """True when a CURRENT-state field is too old to present as a plan.
+
+        Only `task` and `next` can be stale. A decision or a constraint is a
+        historical assertion that age does not invalidate -- it stands until
+        revoked, which is what `journal.REVOKE` exists for. Review was explicit
+        that a single global freshness signal is the wrong shape here.
+        """
+        from .render import is_stale
+        return any(is_stale(f, (self.ages or {}).get(f))
+                   for f in ("task", "next"))
 
     @property
     def is_unverifiable(self) -> bool:

@@ -79,8 +79,13 @@ def observe(cwd=None, transcript=None, window=None, session_started=None):
     )
 
 
-def _exclude_pathspec(cwd, letters_dir):
-    """A git pathspec that ignores our own output, or "" when it is elsewhere.
+def _exclude_pathspec(cwd, *our_dirs):
+    """A git pathspec that ignores EVERY directory dimissory writes to.
+
+    Plural, and that is the fix. It took one argument -- the letters directory
+    -- and then the journal landed inside a repository and dirtied the tree
+    exactly the same way, which is this project's recurring shape: a rule that
+    reached one site and not the rest. Anything dimissory writes goes in here.
 
     Writing a letter INTO the repository changes the working tree the letter
     attests to, so the dirty check failed the instant it was written -- the
@@ -91,23 +96,30 @@ def _exclude_pathspec(cwd, letters_dir):
     a pathspec excluding a directory that does not exist is noise in a document
     someone else has to read.
     """
-    if not cwd or not letters_dir:
+    if not cwd:
         return ""
-    # realpath, not abspath. On macOS a temp dir is /var/folders/... while
-    # getcwd() reports /private/var/folders/... -- the same directory through a
-    # symlink. abspath left them looking unrelated, so the exclusion was never
-    # added and the tree check failed against a world nobody had touched.
-    try:
-        rel = os.path.relpath(os.path.realpath(letters_dir),
-                              os.path.realpath(cwd))
-    except ValueError:                       # different drive on Windows
+    specs = []
+    for d in our_dirs:
+        if not d:
+            continue
+        # realpath, not abspath. On macOS a temp dir is /var/folders/... while
+        # getcwd() reports /private/var/folders/... -- the same directory
+        # through a symlink. abspath left them looking unrelated, so no
+        # exclusion was added and the tree check failed against a world nobody
+        # had touched.
+        try:
+            rel = os.path.relpath(os.path.realpath(d), os.path.realpath(cwd))
+        except ValueError:                   # different drive on Windows
+            continue
+        if rel.startswith(os.pardir) or os.path.isabs(rel):
+            continue                         # outside the repo: nothing to hide
+        specs.append(f":(exclude){rel.replace(os.sep, '/')}")
+    if not specs:
         return ""
-    if rel.startswith(os.pardir) or os.path.isabs(rel):
-        return ""                            # outside the repo: nothing to hide
-    return f" -- ':(exclude){rel.replace(os.sep, '/')}'"
+    return " -- " + " ".join(f"'{x}'" for x in specs)
 
 
-def checks_for(observed, cwd=None, porcelain=None, letters_dir=None):
+def checks_for(observed, cwd=None, porcelain=None, our_dirs=()):
     """The verify block, derived from what was actually observed.
 
     A check is only emitted for a fact that was measured. Fabricating a check
@@ -129,7 +141,7 @@ def checks_for(observed, cwd=None, porcelain=None, letters_dir=None):
         # to anything, so the check could only ever be evaluated on exit status
         # -- and `git status` exits 0 whatever it prints. A check that cannot
         # disagree is the defect this project is named after avoiding.
-        spec = _exclude_pathspec(cwd, letters_dir)
+        spec = _exclude_pathspec(cwd, *our_dirs)
         cmd = "git status --porcelain" + spec
         recorded = porcelain
         if recorded is None:
