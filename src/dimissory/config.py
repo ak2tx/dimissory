@@ -66,6 +66,26 @@ grok = {grok}
 '''
 
 
+def _toml_str(value):
+    """A TOML basic string that survives a Windows path.
+
+    `dim setup` on Windows wrote `dir = "C:\\Users\\me\\..."` with the
+    backslashes raw. `\\U` is a unicode escape in a TOML basic string, so the
+    tool could not parse the config it had just written -- and fell back to
+    defaults while the operator's file sat there looking used. A wrong location
+    reported as success, which is the defect this project inherited a whole file
+    about.
+
+    Escaped rather than emitted as a TOML literal string, because a literal
+    string has no escape at all and would break on a path containing a quote.
+    """
+    out = str(value)
+    for bad, good in (("\\", "\\\\"), ('"', '\\"'),
+                      ("\n", "\\n"), ("\r", "\\r"), ("\t", "\\t")):
+        out = out.replace(bad, good)
+    return out
+
+
 class Config:
     """Effective settings, and an honest account of where each came from."""
 
@@ -113,8 +133,14 @@ class Config:
         flat = {}
         for section, items in self.values.items():
             for key, val in items.items():
-                flat[key] = ("true" if val is True else
-                             "false" if val is False else val)
+                if val is True:
+                    flat[key] = "true"
+                elif val is False:
+                    flat[key] = "false"
+                elif isinstance(val, str):
+                    flat[key] = _toml_str(val)
+                else:
+                    flat[key] = val
         return TEMPLATE.format(**flat)
 
     def write(self, path=None, force=False):

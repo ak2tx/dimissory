@@ -64,8 +64,13 @@ def test_the_config_flag_actually_redirects():
     d = tempfile.mkdtemp(prefix="dim-cfg-")
     letters = os.path.join(d, "elsewhere")
     path = os.path.join(d, "custom.toml")
+    # Written through the same escaper the product uses. Hand-rolling
+    # `dir = "{letters}"` here embedded a raw Windows path, which is not valid
+    # TOML -- so this test failed on Windows for a reason that had nothing to
+    # do with what it was testing.
+    from dimissory.config import _toml_str
     with open(path, "w") as fh:
-        fh.write(f'[letters]\ndir = "{letters}"\n')
+        fh.write(f'[letters]\ndir = "{_toml_str(letters)}"\n')
 
     class A:
         dir = None
@@ -162,6 +167,43 @@ def test_setup_is_safe_to_rerun_and_never_blocks():
           "summary" in joined2 and "detect" in joined2)
 
 
+def test_a_windows_path_survives_being_written_and_read_back():
+    """The config must be parseable by the tool that wrote it.
+
+    On Windows `dim setup` wrote `dir = "C:\\Users\\me\\..."` with raw
+    backslashes. `\\U` is a unicode escape in a TOML basic string, so loading
+    the file raised and the tool fell back to defaults -- while the operator's
+    config sat there looking like it was in use. A wrong location reported as
+    success.
+
+    Asserted with a literal Windows path on EVERY platform, because a bug that
+    only one runner can see is a bug three quarters of the team cannot fix.
+    """
+    import tomllib
+    for path in (r"C:\Users\me\.dimissory\letters",
+                 r"C:\temp\new\utf\letters",      # \U, \n, \t all escapes
+                 '/home/a b/quote"dir/letters'):
+        d = tempfile.mkdtemp(prefix="dim-win-")
+        p = os.path.join(d, "c.toml")
+        cfg = Config.load(p)
+        cfg.values["letters"]["dir"] = path
+        cfg.write(p)
+        try:
+            with open(p, "rb") as fh:
+                tomllib.load(fh)
+            parsed = True
+        except tomllib.TOMLDecodeError as e:
+            parsed = False
+            detail = str(e)
+        check(f"{path!r} writes a parseable config", parsed,
+              locals().get("detail", ""))
+        back = Config.load(p)
+        check(f"{path!r} round-trips to the same value",
+              back.get("letters", "dir") == path, back.get("letters", "dir"))
+        check(f"{path!r} leaves no parse problem",
+              getattr(back, "problem", None) is None, getattr(back, "problem", ""))
+
+
 def main():
     print("=" * 64)
     print(" setup and settings: two things that must agree, and a flag")
@@ -173,7 +215,8 @@ def main():
               test_an_unreadable_config_is_reported_not_swallowed,
               test_writing_a_config_never_clobbers_silently,
               test_the_written_config_parses_back_to_the_same_values,
-              test_setup_is_safe_to_rerun_and_never_blocks):
+              test_setup_is_safe_to_rerun_and_never_blocks,
+              test_a_windows_path_survives_being_written_and_read_back):
         t()
     print("\n" + "=" * 64)
     print(f" {'PASS' if not FAILED else 'FAIL'} {RAN - len(FAILED)}/{RAN}"
