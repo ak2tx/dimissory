@@ -42,22 +42,36 @@ def _root():
     return tempfile.mkdtemp(prefix="dim-journal-")
 
 
-def test_the_append_is_one_syscall_not_a_buffered_write():
-    """Review corrected the mechanism, so the mechanism is asserted.
+def test_no_two_processes_ever_write_the_same_file():
+    """The mechanism, asserted -- because two previous ones measured as fine.
 
-    The first version opened the file in text mode and justified itself with
-    PIPE_BUF. Both halves were wrong -- PIPE_BUF is a pipe guarantee and Python
-    text mode buffers -- so the test that passed was measuring luck.
+    Text-mode append justified by PIPE_BUF: wrong, PIPE_BUF is a pipe
+    guarantee. A single os.write() to an O_APPEND descriptor: measured 960/960
+    on Linux, then Windows CI lost 71 of 960 entries and tore one. O_APPEND is
+    not an atomicity guarantee for concurrent writers to a regular file.
+
+    So the design no longer has concurrent writers. Each process owns a
+    segment, and reading merges them. This asserts that property directly,
+    because an outcome test passed on both broken versions.
     """
+    root = _root()
+    mine = J.path_for("s", root)
+    check("a segment is named for the writing process",
+          str(os.getpid()) in os.path.basename(mine), mine)
+    check("and is unique beyond the pid, since pids are reused",
+          len(os.path.basename(mine).split("-")) >= 2, mine)
+    check("path_for is stable within one process",
+          J.path_for("s", root) == mine)
+
+    # The claim must not survive as a JUSTIFICATION. It may survive as the
+    # record of a correction -- that distinction is the point, and a bare
+    # substring test cannot see it, so this checks the mechanism's own body.
     src = open(os.path.join(ROOT, "src", "dimissory", "journal.py")).read()
     body = src[src.index("def declare"):src.index("def read")]
-    check("declare uses os.write, not a buffered file object",
-          "os.write(" in body, "no os.write")
-    check("on a descriptor opened O_APPEND", "O_APPEND" in body)
-    check("and a short write is raised, not swallowed",
-          "short write" in body)
-    check("the false PIPE_BUF justification is gone",
-          "PIPE_BUF" not in body or "wrong" in body.lower(), "still claimed")
+    check("the append mechanism no longer cites PIPE_BUF as its guarantee",
+          "PIPE_BUF" not in body, "still cited inside declare()")
+    check("and the module records why that reasoning was wrong",
+          "says nothing about regular files" in src, "correction not recorded")
 
 
 def test_concurrent_processes_do_not_lose_or_tear_a_line():
@@ -86,8 +100,13 @@ def test_concurrent_processes_do_not_lose_or_tear_a_line():
     for p in procs:
         p.wait(timeout=120)
 
-    raw = open(J.path_for("s", root), encoding="utf-8").read().splitlines()
+    segs = J.segments("s", root)
+    raw = []
+    for seg in segs:
+        raw += open(seg, encoding="utf-8").read().splitlines()
     torn = sum(1 for ln in raw if ln.strip() and not _parses(ln))
+    check(f"each of the {n} writers got its own segment",
+          len(segs) == n, f"{len(segs)} segments for {n} writers")
     check(f"{n} processes x {per} appends all arrive",
           len(raw) == n * per, f"{len(raw)} lines")
     check("and not one line is torn", torn == 0, f"{torn} torn")
@@ -268,7 +287,7 @@ def main():
     print("=" * 64)
     print(" the agent declares as it works; the trigger only seals it")
     print("=" * 64)
-    for t in (test_the_append_is_one_syscall_not_a_buffered_write,
+    for t in (test_no_two_processes_ever_write_the_same_file,
               test_concurrent_processes_do_not_lose_or_tear_a_line,
               test_current_fields_replace_and_accumulating_fields_do_not,
               test_an_undeclared_field_has_no_age_rather_than_a_zero,

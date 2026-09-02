@@ -15,11 +15,20 @@ reasoning. Asking then produces either nothing or something worse than nothing.
 
 So the agent declares as it goes, and the trigger SEALS what is already there.
 
-APPEND-ONLY, one JSON object per line. Hook invocations are separate concurrent
-processes, and an append of a short line opened with O_APPEND is the only write
-that is safe between them without a lock -- no read-modify-write, no truncation
-window, no partial state if the process dies mid-session. The cost is that
-reading means replaying, which for a few dozen lines is free.
+ONE SEGMENT FILE PER WRITER, append-only, one JSON object per line.
+
+The first two designs shared a single file between processes and were both
+wrong. Text-mode append was justified with PIPE_BUF, which is a pipe guarantee
+and says nothing about regular files. Replacing it with a single os.write() to
+an O_APPEND descriptor measured 960/960 on Linux -- and then Windows CI lost 71
+of 960 entries and tore one. O_APPEND is simply not an atomicity guarantee for
+concurrent writers to a regular file on every platform.
+
+So no two processes ever write the same file. Each writer owns
+`<session>/<pid>-<unique>.jsonl`, and reading merges every segment and orders
+by timestamp. There is no contention to get wrong, no lock to deadlock, and no
+platform-specific behaviour to depend on -- which matters because losing the
+agent's own words is the one failure this module cannot have.
 
 WHAT IS NOT SOLVED HERE: nothing makes an agent call `declare`. That is a
 compliance problem, not a storage problem, and moving it earlier in the session
@@ -33,6 +42,10 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
+
+# This process's segment name, chosen once. See path_for.
+_SEGMENT: dict = {}
 
 # Fields that describe CURRENT STATE: the last one written wins.
 CURRENT = ("task", "next")
@@ -52,12 +65,38 @@ class JournalError(ValueError):
     pass
 
 
-def path_for(session, root=None):
+def _session_dir(session, root=None):
     root = os.path.expanduser(root or "~/.dimissory/journal")
     safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(session))
     if not safe or safe.strip(".") == "":
         raise JournalError(f"unusable session name: {session!r}")
-    return os.path.join(root, f"{safe[:120]}.jsonl")
+    return os.path.join(root, safe[:120])
+
+
+def path_for(session, root=None):
+    """This process's own segment. Nothing else ever writes to it.
+
+    The pid alone is not enough -- pids are reused, and a later process
+    inheriting a dead one's segment would append to a stranger's entries. The
+    random suffix makes collision a non-question.
+    """
+    global _SEGMENT
+    d = _session_dir(session, root)
+    key = (d, os.getpid())
+    if _SEGMENT.get("key") != key:
+        _SEGMENT["key"] = key
+        _SEGMENT["name"] = f"{os.getpid()}-{uuid.uuid4().hex[:8]}.jsonl"
+    return os.path.join(d, _SEGMENT["name"])
+
+
+def segments(session, root=None):
+    """Every writer's segment for this session, in a stable order."""
+    d = _session_dir(session, root)
+    try:
+        return sorted(os.path.join(d, f) for f in os.listdir(d)
+                      if f.endswith(".jsonl"))
+    except OSError:
+        return []
 
 
 def declare(session, field, value, root=None, now=None):
@@ -78,23 +117,14 @@ def declare(session, field, value, root=None, now=None):
     line = json.dumps({"ts": now if now is not None else time.time(),
                        "field": field, "value": text},
                       ensure_ascii=True) + "\n"
-    # ONE os.write() of encoded bytes to a fd opened O_APPEND. The earlier
-    # version used text mode and justified itself with PIPE_BUF, and review was
-    # right that both halves were wrong:
+    # Appending to a file NO OTHER PROCESS WRITES. That is the whole
+    # concurrency strategy, and it is the third one -- the first two shared a
+    # file between writers and both measured fine before failing. See the
+    # module docstring for what they were and how each was disproved.
     #
-    #   PIPE_BUF is a PIPE guarantee (512 on macOS, 4096 on Linux). It says
-    #   nothing about regular files.
-    #
-    #   Python text mode buffers, so `fh.write(line)` is not one write() call
-    #   and may be split wherever the buffer happens to fill.
-    #
-    # The 480/480 result the first version measured was luck, not a property.
-    # A single small write() to an O_APPEND descriptor is the strongest
-    # portable guarantee available without a lock file: the offset update and
-    # the write are one operation, so concurrent hooks interleave whole lines.
-    # It is still not unbounded -- a very large entry can tear -- which is why
-    # `read` treats an unterminated final line as a write in flight rather than
-    # as corruption.
+    # os.write to an O_APPEND descriptor is still used, but as ordinary
+    # care rather than as the guarantee: it keeps a crash mid-session from
+    # leaving a partially buffered entry. The guarantee is the segment.
     data = line.encode("utf-8")
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
@@ -124,36 +154,43 @@ def read(session, root=None):
     count is returned so a caller can say the journal was damaged instead of
     quietly presenting a shorter one.
     """
-    p = path_for(session, root)
     values, ages, damaged, revoked = {}, {}, 0, set()
-    try:
-        with open(p, "rb") as fh:
-            raw = fh.read()
-    except OSError:
-        return {}, {}, 0
-    text = raw.decode("utf-8", "replace")
-    lines = text.splitlines()
-    # A concurrent hook may be mid-append. An unterminated final line is NOT
-    # damage -- it is a write in flight, and counting it as corruption would
-    # make every seal during an active session report a damaged journal.
-    # Dropping it is also what makes sealing DETERMINISTIC: the letter contains
-    # exactly the entries that were complete when it was read, and a
-    # declaration that arrives during the seal simply belongs to the next one.
-    if lines and not text.endswith("\n"):
-        lines.pop()
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+    entries = []
+    for seg in segments(session, root):
         try:
-            d = json.loads(line)
-            field, value, ts = d["field"], d["value"], float(d["ts"])
-        except (ValueError, KeyError, TypeError):
-            damaged += 1
+            with open(seg, "rb") as fh:
+                raw = fh.read()
+        except OSError:
             continue
-        if field not in WRITABLE or not isinstance(value, str):
-            damaged += 1
-            continue
+        text = raw.decode("utf-8", "replace")
+        lines = text.splitlines()
+        # An unterminated final line is a write in FLIGHT, not corruption.
+        # Counting it as damage would make every read during an active session
+        # report a damaged journal; including half of it would put a truncated
+        # decision in the letter. Dropping it is what makes sealing
+        # deterministic -- a declaration arriving mid-seal belongs to the next
+        # letter.
+        if lines and not text.endswith("\n"):
+            lines.pop()
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                field, value, ts = d["field"], d["value"], float(d["ts"])
+            except (ValueError, KeyError, TypeError):
+                damaged += 1
+                continue
+            if field not in WRITABLE or not isinstance(value, str):
+                damaged += 1
+                continue
+            # (ts, segment, line) so a merge across writers is total and
+            # deterministic. Two processes can stamp the same instant; without
+            # a tiebreak, "last write wins" would depend on directory order.
+            entries.append((ts, seg, i, field, value))
+
+    for ts, _seg, _i, field, value in sorted(entries, key=lambda e: e[:3]):
         if field == REVOKE:
             revoked.add(value)
             ages[REVOKE] = max(ages.get(REVOKE, ts), ts)
@@ -165,8 +202,9 @@ def read(session, root=None):
             if value not in values[field]:      # a repeated decision is one
                 values[field].append(value)
         ages[field] = max(ages.get(field, ts), ts)
-    # Applied AFTER the replay so a revocation works regardless of the order
-    # it was appended in relative to the thing it retracts.
+
+    # Applied AFTER the replay so a revocation works regardless of which
+    # segment or order it was written in.
     for f in ACCUMULATE:
         if f in values:
             values[f] = tuple(v for v in values[f] if v not in revoked)
