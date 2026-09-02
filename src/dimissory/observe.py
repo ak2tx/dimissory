@@ -93,8 +93,13 @@ def _exclude_pathspec(cwd, letters_dir):
     """
     if not cwd or not letters_dir:
         return ""
+    # realpath, not abspath. On macOS a temp dir is /var/folders/... while
+    # getcwd() reports /private/var/folders/... -- the same directory through a
+    # symlink. abspath left them looking unrelated, so the exclusion was never
+    # added and the tree check failed against a world nobody had touched.
     try:
-        rel = os.path.relpath(os.path.abspath(letters_dir), os.path.abspath(cwd))
+        rel = os.path.relpath(os.path.realpath(letters_dir),
+                              os.path.realpath(cwd))
     except ValueError:                       # different drive on Windows
         return ""
     if rel.startswith(os.pardir) or os.path.isabs(rel):

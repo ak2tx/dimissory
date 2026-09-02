@@ -183,6 +183,59 @@ def test_a_letter_with_no_verify_block_is_refused():
     check("and says it carries no checks", "no checks" in out.lower(), out[-160:])
 
 
+def test_the_exclusion_survives_a_symlinked_working_directory():
+    """The macOS failure, asserted on every platform.
+
+    A temp dir there is /var/folders/... while getcwd() reports
+    /private/var/folders/... -- the same directory through a symlink. With
+    abspath the two looked unrelated, so the letters directory was judged
+    "outside the repo", no exclusion was added, and the tree check failed
+    against a world nobody had touched. CI on one runner was the only thing
+    that knew.
+    """
+    from dimissory.observe import _exclude_pathspec
+    d = tempfile.mkdtemp(prefix="dim-sym-")
+    real, link = os.path.join(d, "real"), os.path.join(d, "link")
+    os.makedirs(real)
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError, AttributeError):
+        return skip("exclusion survives a symlinked cwd", "no symlink support")
+    spec = _exclude_pathspec(real, os.path.join(link, "letters"))
+    check("the same directory reached through a symlink still excludes",
+          "exclude" in spec, repr(spec))
+    check("and it names the directory, not a ../ path",
+          ".." not in spec, repr(spec))
+    outside = _exclude_pathspec(real, tempfile.mkdtemp(prefix="dim-out-"))
+    check("a letters dir genuinely outside the repo adds no pathspec",
+          outside == "", repr(outside))
+
+
+def test_checks_run_without_a_shell():
+    """The Windows failure, and a security boundary in the same change.
+
+    cmd.exe does not strip single quotes, so `-- ':(exclude)letters'` reached
+    git with the quotes attached and the exclusion silently did nothing.
+
+    The deeper reason not to use a shell: a letter is a portable document that
+    arrives from another machine, and `resume` executes what is written in it.
+    Review: keep executable verify content machine-generated. A shell would add
+    redirection, chaining and expansion to anything that ever lands there.
+    """
+    import shlex
+    src = open(os.path.join(ROOT, "src", "dimissory", "cli.py")).read()
+    body = src[src.index("def cmd_resume"):src.index("def cmd_setup")]
+    check("resume does not run checks through a shell",
+          "shell=True" not in body, "shell=True is present")
+    check("it splits the command instead", "shlex.split" in body)
+
+    argv = shlex.split("git status --porcelain -- ':(exclude)letters'")
+    check("the pathspec becomes ONE argv element",
+          argv[-1] == ":(exclude)letters", argv)
+    check("with no quote characters left in it",
+          "'" not in argv[-1] and '"' not in argv[-1], argv[-1])
+
+
 def main_():
     print("=" * 66)
     print(" the verify block fails when the world moved, or it is decoration")
@@ -191,7 +244,9 @@ def main_():
               test_a_letter_goes_stale_when_the_tree_changes,
               test_writing_the_letter_does_not_invalidate_the_letter,
               test_a_check_with_no_recorded_expectation_is_not_a_pass,
-              test_a_letter_with_no_verify_block_is_refused):
+              test_a_letter_with_no_verify_block_is_refused,
+              test_the_exclusion_survives_a_symlinked_working_directory,
+              test_checks_run_without_a_shell):
         t()
     print("\n" + "=" * 66)
     print(f" {'PASS' if not FAILED else 'FAIL'} {RAN - len(FAILED)}/{RAN}"

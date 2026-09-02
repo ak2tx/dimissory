@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 
@@ -42,9 +43,10 @@ def cmd_write(args):
     _spec = _exclude_pathspec(cwd, _d)
     # The recorded output must come from the SAME command the letter asks the
     # reader to run, exclusions included, or the two can never agree.
+    _rel = (os.path.relpath(os.path.realpath(_d), os.path.realpath(cwd))
+            .replace(os.sep, "/")) if _spec else None
     _porcelain = _git(cwd, "status", "--porcelain",
-                      *(["--", f":(exclude){os.path.relpath(_d, cwd)}"]
-                        if _spec else []))
+                      *(["--", f":(exclude){_rel}"] if _spec else []))
     brief = Brief(
         session=args.session or os.path.basename(os.getcwd()) or "session",
         observed=o,
@@ -135,7 +137,24 @@ def cmd_resume(args):
     stale = 0
     for cmd, expect in pairs:
         try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+            # NO SHELL. Two reasons, and both were live.
+            #
+            # Portability: the tree check carries a git pathspec,
+            # `-- ':(exclude)letters'`. cmd.exe does not strip single quotes,
+            # so on Windows git received the quotes literally and the exclusion
+            # silently did nothing. shlex.split gives the same argv everywhere.
+            #
+            # Safety: a letter is a portable document that arrives from another
+            # machine, and `resume` executes what is written in it. Review's
+            # words: keep executable verify content machine-generated. Running
+            # it through a shell adds redirection, chaining and expansion to
+            # anything that ever reaches this block.
+            argv = shlex.split(cmd)
+            if not argv:
+                print(f"  FAIL  {cmd}\n          unparseable command")
+                stale += 1
+                continue
+            r = subprocess.run(argv, capture_output=True, text=True,
                                timeout=30)
             got = (r.stdout or "").strip()
             ran = r.returncode == 0
