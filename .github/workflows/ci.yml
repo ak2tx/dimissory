@@ -7,7 +7,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.9", "3.12", "3.13"]
+        python: ["3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -18,6 +18,10 @@ jobs:
         run: python -c "import sys; sys.path.insert(0,'src'); import dimissory, dimissory.cli, dimissory.observe, dimissory.render"
       - name: the trust contract
         run: python tests/test_contract.py
+      - name: setup and settings
+        run: python tests/test_setup_and_config.py
+      - name: the declared Python floor
+        run: python tests/test_declared_floor.py
 
   package:
     runs-on: ubuntu-latest

@@ -131,7 +131,11 @@ came from publishing the unflattering number:
 ## Development
 
 ```bash
-python3 tests/test_contract.py     # no dependencies, no test runner
+python3 tests/test_contract.py          # the trust contract
+python3 tests/test_setup_and_config.py  # setup, settings, and the -c flag
+python3 tests/test_declared_floor.py    # the Python version we claim to support
 ```
+
+No dependencies and no test runner. Requires Python 3.11+ (`tomllib`).
 
 MIT © Ak2tx LLC

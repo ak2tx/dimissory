@@ -7,7 +7,7 @@ name = "dimissory"
 version = "0.0.1"
 description = "Don't lose the run when the window closes. Portable, verifiable handoff letters for agent CLIs."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Ak2tx LLC" }]
 keywords = ["agent", "handoff", "continuity", "quota", "rate-limit",
@@ -19,6 +19,9 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = []
