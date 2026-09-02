@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dimissory"
+version = "0.0.1"
+description = "Don't lose the run when the window closes. Portable, verifiable handoff letters for agent CLIs."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Ak2tx LLC" }]
+keywords = ["agent", "handoff", "continuity", "quota", "rate-limit",
+            "resume", "claude-code", "codex", "grok"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ak2tx/Dimissory"
+Source = "https://github.com/ak2tx/Dimissory"
+
+[project.scripts]
+dim = "dimissory.cli:main"
+dimissory = "dimissory.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,157 @@
+"""`dim setup` -- one guided command instead of five things you had to know.
+
+Written against a specific failure in the predecessor's setup command. Its
+agent-seeding branch tested `"anthropic" in found`, where `found` was keyed by
+CLI name -- `claude`, `codex`, `grok`. The condition was never true, so the one
+step that existed to fix the thing people called clunky silently never ran, and
+setup printed success every time. It was found only by running it on a machine
+that actually had the agent installed.
+
+So the rule here: every step returns what it actually did, and the summary is
+built from those return values rather than from the fact that the function was
+called. A step that did nothing says it did nothing.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+
+from .config import Config
+
+AGENTS = (
+    ("claude", "Claude Code"),
+    ("codex", "Codex CLI"),
+    ("grok", "Grok CLI"),
+)
+
+
+def detect_agents():
+    """Which agent CLIs are on PATH. Keyed by the SAME name the config uses.
+
+    The key is `claude`/`codex`/`grok` in both places, deliberately and with a
+    test, because the predecessor's setup was keyed one way and queried the
+    other and nobody noticed for weeks.
+    """
+    return {key: shutil.which(key) for key, _label in AGENTS}
+
+
+def _ask(prompt, default=True, assume=None):
+    """Ask, unless there is nobody to ask. Never blocks a non-interactive run."""
+    if assume is not None:
+        return assume
+    if not sys.stdin.isatty():
+        return default
+    suffix = " [Y/n] " if default else " [y/N] "
+    try:
+        answer = input(prompt + suffix).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return default if not answer else answer.startswith("y")
+
+
+def run(config_path=None, assume_yes=None, out=print):
+    """Guided setup. Safe to re-run; nothing here overwrites without asking.
+
+    Returns an exit code. Every line printed is something that was checked,
+    not something that was assumed.
+    """
+    steps = []                       # (label, what actually happened)
+
+    out("")
+    out("  dimissory setup")
+    out("  ---------------")
+    out("")
+
+    # 1. What is actually installed.
+    found = detect_agents()
+    have = [k for k, path in found.items() if path]
+    out("  agent CLIs on PATH:")
+    for key, label in AGENTS:
+        path = found[key]
+        out(f"    {'yes' if path else ' no'}  {label:<12} "
+            f"{path or '(not installed)'}")
+    steps.append(("detect", f"{len(have)} of {len(AGENTS)} found"))
+    if not have:
+        out("")
+        out("  None found. dimissory can still write letters by hand"
+            " (`dim write`),")
+        out("  but there is nothing to write them FOR until an agent CLI is"
+            " installed.")
+
+    # 2. Config.
+    cfg = Config.load(config_path)
+    out("")
+    if getattr(cfg, "problem", None):
+        out(f"  config UNREADABLE: {cfg.problem}")
+        out("  Running on defaults. Fix or delete the file -- it is NOT in"
+            " effect.")
+        steps.append(("config", "unreadable, defaults in use"))
+    elif os.path.exists(cfg.path):
+        out(f"  config already at {cfg.path} -- left alone")
+        steps.append(("config", "already existed, unchanged"))
+    else:
+        if _ask(f"  write a config at {cfg.path}?", True, assume_yes):
+            written = cfg.write()
+            if written:
+                out(f"  wrote {written}")
+                steps.append(("config", f"created {written}"))
+            else:
+                out("  config not written")
+                steps.append(("config", "write refused"))
+        else:
+            out("  skipped; defaults are in effect")
+            steps.append(("config", "declined, defaults in use"))
+
+    # 3. Where letters will go.
+    d = cfg.letters_dir
+    existed = os.path.isdir(d)
+    try:
+        os.makedirs(d, exist_ok=True)
+        steps.append(("letters", "already there" if existed else f"created {d}"))
+        out(f"  letters -> {d}" + ("" if existed else "  (created)"))
+    except OSError as e:
+        out(f"  could NOT create {d}: {e}")
+        steps.append(("letters", f"failed: {e}"))
+
+    # 4. Prove it works, rather than asserting it does.
+    out("")
+    if _ask("  write one letter now, to prove the whole path works?",
+            True, assume_yes):
+        from .brief import Brief, Declared
+        from .observe import checks_for, observe
+        from .render import render
+        import time
+        o = observe(cwd=os.getcwd())
+        b = Brief(session="setup-check", observed=o, declared=Declared(),
+                  checks=checks_for(o))
+        path = os.path.join(d, f"setup-check-{time.strftime('%Y%m%dT%H%M%S')}.md")
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(render(b))
+            measured = sorted(o.known())
+            out(f"  wrote {path}")
+            out(f"  it measured: {', '.join(measured) or 'nothing'}")
+            if b.is_degraded:
+                out("  and it is marked DEGRADED, correctly -- no agent wrote"
+                    " a half for it.")
+            steps.append(("letter", f"wrote one, measured {len(measured)} field(s)"))
+        except OSError as e:
+            out(f"  could NOT write a letter: {e}")
+            steps.append(("letter", f"failed: {e}"))
+    else:
+        steps.append(("letter", "skipped"))
+
+    # 5. What actually happened -- assembled from the results above.
+    out("")
+    out("  summary")
+    for label, what in steps:
+        out(f"    {label:<8} {what}")
+    out("")
+    out("  next:  dim write     issue a letter")
+    out("         dim config    see every setting and where it came from")
+    out("")
+    failed = [l for l, w in steps if "failed" in w or "UNREAD" in w.upper()]
+    return 1 if failed else 0
