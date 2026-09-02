@@ -40,7 +40,8 @@ def _git(cwd, *args):
     return p.stdout.strip()
 
 
-def observe(cwd=None, transcript=None, window=None, session_started=None):
+def observe(cwd=None, transcript=None, window=None, session_started=None,
+            our_dirs=()):
     """Everything establishable about the world, right now.
 
     `window` is the plan-window reading, if a meter supplied one. It is passed
@@ -50,7 +51,20 @@ def observe(cwd=None, transcript=None, window=None, session_started=None):
     cwd = cwd or os.getcwd()
     head = _git(cwd, "rev-parse", "--short", "HEAD")
     subject = _git(cwd, "log", "-1", "--format=%s")
-    status = _git(cwd, "status", "--porcelain")
+    # Excluding our own directories HERE as well as in the check. They were
+    # filtered in one place and not the other, so the letter reported
+    # `dirty j/, src.py` while verifying only `src.py` -- two different answers
+    # to one question, and the reported one blamed the session for dimissory's
+    # own journal. Third site for this rule; it is now derived once.
+    _ex = []
+    for d in our_dirs or ():
+        try:
+            r = os.path.relpath(os.path.realpath(d), os.path.realpath(cwd))
+        except ValueError:
+            continue
+        if not r.startswith(os.pardir) and not os.path.isabs(r):
+            _ex.append(f":(exclude){r.replace(os.sep, '/')}")
+    status = _git(cwd, "status", "--porcelain", *(["--", *_ex] if _ex else []))
 
     porcelain = status
     dirty = UNMEASURED

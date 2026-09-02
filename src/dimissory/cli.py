@@ -64,10 +64,11 @@ def _letters_dir(args):
 
 def cmd_write(args):
     cwd = args.cwd or os.getcwd()
-    o = observe(cwd=cwd, transcript=args.transcript)
+    _d0 = _letters_dir(args)
+    _j0 = os.path.expanduser(args.journal or "~/.dimissory/journal")
+    o = observe(cwd=cwd, transcript=args.transcript, our_dirs=(_d0, _j0))
     from .observe import _exclude_pathspec, _git
-    _d = _letters_dir(args)
-    _j = os.path.expanduser(args.journal or "~/.dimissory/journal")
+    _d, _j = _d0, _j0
     _ours = (_d, _j)
     _spec = _exclude_pathspec(cwd, *_ours)
     # The recorded output must come from the SAME command the letter asks the
