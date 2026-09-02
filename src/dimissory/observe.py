@@ -52,6 +52,7 @@ def observe(cwd=None, transcript=None, window=None, session_started=None):
     subject = _git(cwd, "log", "-1", "--format=%s")
     status = _git(cwd, "status", "--porcelain")
 
+    porcelain = status
     dirty = UNMEASURED
     if status is not UNMEASURED:
         # An empty status is a MEASURED clean tree -- an empty tuple, not
@@ -78,7 +79,30 @@ def observe(cwd=None, transcript=None, window=None, session_started=None):
     )
 
 
-def checks_for(observed, cwd=None):
+def _exclude_pathspec(cwd, letters_dir):
+    """A git pathspec that ignores our own output, or "" when it is elsewhere.
+
+    Writing a letter INTO the repository changes the working tree the letter
+    attests to, so the dirty check failed the instant it was written -- the
+    tool's own output moved the thing it was measuring. Observed on the first
+    real run of the fixed verifier.
+
+    Only added when the letters directory is actually inside the repo, because
+    a pathspec excluding a directory that does not exist is noise in a document
+    someone else has to read.
+    """
+    if not cwd or not letters_dir:
+        return ""
+    try:
+        rel = os.path.relpath(os.path.abspath(letters_dir), os.path.abspath(cwd))
+    except ValueError:                       # different drive on Windows
+        return ""
+    if rel.startswith(os.pardir) or os.path.isabs(rel):
+        return ""                            # outside the repo: nothing to hide
+    return f" -- ':(exclude){rel.replace(os.sep, '/')}'"
+
+
+def checks_for(observed, cwd=None, porcelain=None, letters_dir=None):
     """The verify block, derived from what was actually observed.
 
     A check is only emitted for a fact that was measured. Fabricating a check
@@ -95,9 +119,19 @@ def checks_for(observed, cwd=None):
             why="the commit this letter was written against",
         ))
     if "dirty" in k and k["dirty"]:
+        # The expectation must be the command's ACTUAL OUTPUT, not a prose
+        # description of it. `expect="2 modified path(s)"` can never be compared
+        # to anything, so the check could only ever be evaluated on exit status
+        # -- and `git status` exits 0 whatever it prints. A check that cannot
+        # disagree is the defect this project is named after avoiding.
+        spec = _exclude_pathspec(cwd, letters_dir)
+        cmd = "git status --porcelain" + spec
+        recorded = porcelain
+        if recorded is None:
+            recorded = "\n".join(sorted(k["dirty"]))
         out.append(Check(
-            command="git status --porcelain",
-            expect=f"{len(k['dirty'])} modified path(s)",
+            command=cmd,
+            expect=recorded,
             why="uncommitted work the letter assumes is still present",
         ))
     return tuple(out)

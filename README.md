@@ -102,7 +102,7 @@ deliberately no exit code meaning "probably fine".
 | Brief model and trust contract | working, 32 checks |
 | Markdown renderer | working |
 | Observed block — git, dirty paths | working |
-| Verify block — derive, render, run | working |
+| Verify block — derive, render, compare, fail | working |
 | Transcript reading — bounded tail, hashed args | working |
 | Observed block — last command and exit code | not yet |
 | Plan-window meter | porting |
@@ -134,6 +134,7 @@ came from publishing the unflattering number:
 python3 tests/test_contract.py          # the trust contract
 python3 tests/test_setup_and_config.py  # setup, settings, and the -c flag
 python3 tests/test_declared_floor.py    # the Python version we claim to support
+python3 tests/test_verify_can_fail.py   # the verify block detects a moved world
 ```
 
 No dependencies and no test runner. Requires Python 3.11+ (`tomllib`).

@@ -35,7 +35,16 @@ def _letters_dir(args):
 
 
 def cmd_write(args):
-    o = observe(cwd=args.cwd or os.getcwd(), transcript=args.transcript)
+    cwd = args.cwd or os.getcwd()
+    o = observe(cwd=cwd, transcript=args.transcript)
+    from .observe import _exclude_pathspec, _git
+    _d = _letters_dir(args)
+    _spec = _exclude_pathspec(cwd, _d)
+    # The recorded output must come from the SAME command the letter asks the
+    # reader to run, exclusions included, or the two can never agree.
+    _porcelain = _git(cwd, "status", "--porcelain",
+                      *(["--", f":(exclude){os.path.relpath(_d, cwd)}"]
+                        if _spec else []))
     brief = Brief(
         session=args.session or os.path.basename(os.getcwd()) or "session",
         observed=o,
@@ -43,7 +52,9 @@ def cmd_write(args):
         # DEGRADED banner in this state rather than looking finished, which is
         # the whole reason that banner exists.
         declared=Declared(),
-        checks=checks_for(o, cwd=args.cwd),
+        checks=checks_for(o, cwd=cwd, letters_dir=_d,
+                          porcelain=_porcelain if isinstance(_porcelain, str)
+                          else None),
     )
     d = _letters_dir(args)
     os.makedirs(d, exist_ok=True)
@@ -93,23 +104,62 @@ def cmd_resume(args):
               file=sys.stderr)
         return 2
     block = text.split("## Verify first", 1)[1].split("```")[1]
-    cmds = [ln for ln in block.splitlines()
-            if ln.strip() and not ln.lstrip().startswith("#")]
-    stale = 0
-    for c in cmds:
-        try:
-            r = subprocess.run(c, shell=True, capture_output=True, text=True,
-                               timeout=30)
-            ok = r.returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            ok = False
-        print(f"  {'ok  ' if ok else 'FAIL'}  {c}")
-        stale += 0 if ok else 1
-    if stale:
-        print(f"\n{p} is STALE: {stale} check(s) disagree. Re-derive before "
-              f"continuing.", file=sys.stderr)
+
+    # Parse `command` followed by its `#   expected:` line. The expectation is
+    # load-bearing: the first version compared nothing and asked only whether
+    # the command exited 0. `git rev-parse --short HEAD` exits 0 in ANY
+    # repository, so a letter written at one commit reported "still holds" at
+    # another -- the verify block, the entire differentiator, could not fail
+    # for the reason it exists. Found in review, reproduced in seconds.
+    pairs, pending = [], None
+    for ln in block.splitlines():
+        t = ln.strip()
+        if not t:
+            continue
+        if t.startswith("#   expected:"):
+            if pending is not None:
+                pairs.append((pending, t.split("expected:", 1)[1].strip()))
+                pending = None
+        elif t.startswith("#"):
+            continue
+        else:
+            pending = t
+    if pending is not None:
+        pairs.append((pending, None))
+
+    if not pairs:
+        print(f"{p}: no checks could be parsed from the Verify block.",
+              file=sys.stderr)
         return 2
-    print(f"\n{p} still holds.")
+
+    stale = 0
+    for cmd, expect in pairs:
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                               timeout=30)
+            got = (r.stdout or "").strip()
+            ran = r.returncode == 0
+        except (OSError, subprocess.SubprocessError) as e:
+            got, ran = str(e), False
+        if not ran:
+            ok, why = False, "command failed"
+        elif expect is None:
+            # No recorded expectation means nothing to compare against. That is
+            # NOT a pass -- it is a check that cannot fail, and saying so is the
+            # whole point of this tool.
+            ok, why = False, "no recorded expectation to compare against"
+        else:
+            ok = got == expect.strip()
+            why = "" if ok else f"expected {expect.strip()!r}, got {got!r}"
+        print(f"  {'ok  ' if ok else 'FAIL'}  {cmd}"
+              + (f"\n          {why}" if why else ""))
+        stale += 0 if ok else 1
+
+    if stale:
+        print(f"\n{p} is STALE: {stale} of {len(pairs)} check(s) disagree. "
+              f"Re-derive before continuing.", file=sys.stderr)
+        return 2
+    print(f"\n{p} still holds ({len(pairs)} check(s) agreed).")
     return 0
 
 

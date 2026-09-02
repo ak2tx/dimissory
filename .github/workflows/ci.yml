@@ -22,6 +22,8 @@ jobs:
         run: python tests/test_setup_and_config.py
       - name: the declared Python floor
         run: python tests/test_declared_floor.py
+      - name: the verify block can fail
+        run: python tests/test_verify_can_fail.py
 
   package:
     runs-on: ubuntu-latest
