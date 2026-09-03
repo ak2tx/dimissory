@@ -377,6 +377,53 @@ def test_the_statusline_install_also_refuses_a_file_changed_mid_prompt():
     check("an untouched file installs normally", got == p2, got)
 
 
+def test_codex_hooks_are_reported_as_unarmed_until_codex_trusts_them():
+    """Installed is not armed, and Codex says nothing about the difference.
+
+    Measured on a live box, same file and same task:
+
+        codex exec ...                              -> 0 hooks fired
+        codex exec --dangerously-bypass-hook-trust  -> 2 hooks fired
+
+    So `dim hook --install` wrote a valid config, reported success, and
+    produced nothing -- this lineage's signature defect applied to an entire
+    vendor. dimissory does not forge the trust record: that is a control the
+    vendor built deliberately, and the flag that skips it is named
+    `--dangerously-bypass-hook-trust`. It reports, and the operator decides.
+    """
+    d = tempfile.mkdtemp(prefix="dim-trust-")
+    p = os.path.join(d, "hooks.json")
+
+    check("a missing file is not trusted", I.codex_hooks_trusted(p)[0] is False)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("{}")
+    check("an empty file is not trusted", I.codex_hooks_trusted(p)[0] is False)
+
+    _e, merged, _a = I.plan("codex", "dim hook", p)
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(merged, fh)
+    ok, why = I.codex_hooks_trusted(p)
+    check("hooks we just wrote are NOT trusted yet", ok is False)
+    check("and the reason says they will not run",
+          "will not run them" in why, why)
+    check("and it names the fix", "codex" in why and "approve" in why, why)
+
+    # Once Codex records its trust, we must stop nagging.
+    blob = json.load(open(p, encoding="utf-8"))
+    blob["state"] = {"enabled": True, "trusted_hash": "deadbeef"}
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(blob, fh)
+    check("a trust record flips it", I.codex_hooks_trusted(p)[0] is True)
+
+    # And the install path must SAY so rather than reporting a bare success.
+    d2 = tempfile.mkdtemp(prefix="dim-trust2-")
+    p2 = os.path.join(d2, "hooks.json")
+    said = []
+    I.install("codex", path=p2, assume_yes=True, out=said.append, verify=False)
+    check("install warns that the hooks are not armed yet",
+          any("NOT ARMED YET" in line for line in said), said[-3:])
+
+
 def test_codex_is_not_given_a_turn_end_gate_it_does_not_have():
     """Codex's event registry has no bare Stop. Installing one would put a
     hook in the file that can never fire -- configuration that looks like
@@ -408,6 +455,7 @@ def main():
               test_a_leftover_backup_name_cannot_cost_the_original,
               test_a_file_edited_while_the_prompt_waits_is_not_silently_reverted,
               test_the_statusline_install_also_refuses_a_file_changed_mid_prompt,
+              test_codex_hooks_are_reported_as_unarmed_until_codex_trusts_them,
               test_codex_is_not_given_a_turn_end_gate_it_does_not_have):
         t()
     print("\n" + "=" * 66)

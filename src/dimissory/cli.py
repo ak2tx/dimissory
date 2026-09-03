@@ -584,6 +584,13 @@ def cmd_status(args):
         except (OSError, KeyError):
             installed = "?"
         hooks_ok = installed == "yes"
+        # Codex will not RUN a hook it has not trusted, and says nothing when
+        # it declines to. Installed is not armed.
+        if key == "codex" and hooks_ok:
+            trusted, why = I.codex_hooks_trusted()
+            if not trusted:
+                hooks_ok = False
+                installed = "untrusted"
 
         win = None
         if key == "claude":

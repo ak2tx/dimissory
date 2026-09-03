@@ -131,6 +131,50 @@ EXTRA_PLACES = {
 }
 
 
+def codex_hooks_trusted(path=None):
+    """Whether Codex will actually RUN the hooks in its config. (ok, why).
+
+    MEASURED, and it is the difference between installed and working. Codex
+    gates hooks behind a trust record, and an untrusted hook does not fire --
+    silently. On a live box, with hooks correctly written to ~/.codex/hooks.json:
+
+        codex exec ...                                -> 0 hooks fired
+        codex exec --dangerously-bypass-hook-trust    -> 2 hooks fired
+
+    Same file, same hooks, same task. So `dim hook --install` was writing a
+    valid config, reporting success, and producing nothing at all -- this
+    lineage's signature defect, on a whole vendor. The README's claim that
+    "codex exec fires UserPromptSubmit but not PostToolUse" was wrong in both
+    halves: it fires NOTHING, and neither does interactive Codex, until the
+    hooks are trusted.
+
+    Trust is granted by Codex, in its own TUI. The binary carries
+    `HookStateToml { enabled, trusted_hash }` and a "config/batchWrite failed
+    while updating hook trust in TUI" message, so a hash Codex computes is the
+    thing that unlocks it.
+
+    dimissory does NOT forge that hash. It is a security control the vendor
+    built on purpose, and the flag that skips it is called
+    `--dangerously-bypass-hook-trust`. Writing a trust record on the operator's
+    behalf would be defeating a safety mechanism to make our own feature look
+    like it works, which is the opposite of what this tool is for. So this
+    REPORTS, and the operator decides.
+    """
+    p = os.path.expanduser(path or TARGETS["codex"]["path"])
+    try:
+        with open(p, encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError:
+        return False, "no hooks file"
+    if not raw.strip() or raw.strip() == "{}":
+        return False, "no hooks installed"
+    if "trusted_hash" in raw:
+        return True, ""
+    return False, ("Codex has no trust record for these hooks, so it will not "
+                   "run them. Start `codex` once and approve them when it "
+                   "asks; until then nothing fires and nothing says so.")
+
+
 def detect():
     """Where each agent CLI actually is, keyed as TARGETS is keyed.
 
@@ -441,4 +485,11 @@ def install(target, command=None, path=None, assume_yes=False,
         fh.write("\n")
     os.replace(tmp, p)
     out(f"    wrote {p}" + (f" (previous kept at {backup})" if backup else ""))
+    if target == "codex":
+        ok, why = codex_hooks_trusted(p)
+        if not ok:
+            # Saying this is the whole job. Measured: an untrusted Codex hook
+            # fires zero times and reports nothing, so an install that stops
+            # at "wrote the file" is an install that lies.
+            out(f"    NOT ARMED YET: {why}")
     return p, added

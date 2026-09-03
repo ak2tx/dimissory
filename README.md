@@ -14,13 +14,13 @@ the work instead of reconstructing it. On another account, or another model.
 pip install dimissory
 ```
 
-> **Status: early, `0.0.2`.** The brief format, the trust contract, the verify
+> **Status: early, `0.0.6`.** The brief format, the trust contract, the verify
 > mechanism, the agent hooks and the plan-window meter all work and are tested
-> — 540 checks across 10 files. What is *not* done is listed under
-> [What is built](#what-is-built), including the gap that matters most:
-> non-interactive runs have no meter on either vendor. Claude needs
-> `dim statusline --install` as a second step, and `dim status` will tell you
-> if you skipped it — it exits non-zero when nothing can seal.
+> — 561 checks across 10 files, green from a bare checkout with nothing
+> installed. Two vendors need a second step before anything is automatic, and
+> `dim status` exits non-zero until they have it: Claude needs
+> `dim statusline --install`, and Codex needs you to approve its hooks once.
+> Both are listed under [Known gaps](#known-gaps-stated-plainly).
 
 ---
 
@@ -89,6 +89,7 @@ documented all of them correctly and shipped the opposite anyway.
 ## Use
 
 ```bash
+dim meter                 # how much of every plan window is gone
 dim write                 # issue a letter now
 dim show                  # print the most recent one
 dim resume                # run its Verify block; exit 2 if stale
@@ -118,7 +119,7 @@ deliberately no exit code meaning "probably fine".
 | `dim status` | working |
 | Observed block — last command and exit code | not yet |
 | Pruning old letters (`letters.keep`) | not yet, setting is inert |
-| `codex exec` (non-interactive) | no seal path, see below |
+| Codex hooks | installed, but inert until Codex trusts them |
 | Cross-account delivery | not yet |
 
 ### Claude needs one extra step, and it is not optional
@@ -154,11 +155,24 @@ an interface it already invokes on its own schedule.
 
 ### Known gaps, stated plainly
 
-**Non-interactive runs have no meter, on either vendor.** `codex exec` fires
-`UserPromptSubmit` but not `PostToolUse`, so it has no seal path at all.
-`claude -p`, the SDK, and `--safe-mode` have no status bar, so nothing records
-Claude's window there either. Both are the same shape of gap: the interface
-that carries the number only exists in the interactive TUI.
+**Codex will not run a hook it has not trusted, and says nothing when it
+declines to.** Measured on a live box, same file and same task:
+
+```
+codex exec ...                              ->  0 hooks fired
+codex exec --dangerously-bypass-hook-trust  ->  2 hooks fired
+```
+
+So installing Codex hooks is necessary and not sufficient. Start `codex` once
+and approve them when it asks. `dim hook --install` now says `NOT ARMED YET`
+rather than reporting a bare success, and `dim status` shows Codex as
+`untrusted` instead of `yes`. dimissory does **not** write a trust record on
+your behalf — that is a control Codex built deliberately, and the flag which
+skips it is called `--dangerously-bypass-hook-trust`.
+
+**Non-interactive Claude has no meter.** `claude -p`, the SDK, and
+`--safe-mode` have no status bar, so nothing records Claude's window there:
+the interface that carries the number only exists in the interactive TUI.
 
 **The sample clock and the seal clock are different clocks.** The seal fires
 on tool calls; the statusline does *not* — Claude Code re-renders on session
