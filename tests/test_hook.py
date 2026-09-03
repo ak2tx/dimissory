@@ -214,9 +214,11 @@ def test_installing_twice_adds_nothing_the_second_time():
     d = tempfile.mkdtemp(prefix="dim-inst-")
     p = os.path.join(d, "settings.json")
     out = []
-    I.install("claude", path=p, assume_yes=True, out=out.append)
+    I.install("claude", path=p, assume_yes=True, out=out.append,
+                  verify=False)
     first = json.load(open(p, encoding="utf-8"))
-    I.install("claude", path=p, assume_yes=True, out=out.append)
+    I.install("claude", path=p, assume_yes=True, out=out.append,
+                  verify=False)
     second = json.load(open(p, encoding="utf-8"))
     check("the file is unchanged by a second install", first == second)
     n = sum(len(v) for v in second["hooks"].values())
@@ -230,7 +232,7 @@ def test_declining_changes_nothing_and_is_not_success():
     with open(p, "w", encoding="utf-8") as fh:
         json.dump({"theme": "dark"}, fh)
     before = open(p, encoding="utf-8").read()
-    path, added = I.install("claude", path=p, assume_yes=False,
+    path, added = I.install("claude", path=p, assume_yes=False, verify=False,
                             out=lambda *_a: None, ask=lambda _p: "n")
     check("declining returns no path", path is None, path)
     check("and nothing was added", added == [], added)
@@ -245,14 +247,16 @@ def test_the_previous_file_is_kept_and_never_overwritten():
     p = os.path.join(d, "settings.json")
     with open(p, "w", encoding="utf-8") as fh:
         json.dump({"theme": "THE ORIGINAL"}, fh)
-    I.install("claude", path=p, assume_yes=True, out=lambda *_a: None)
+    I.install("claude", path=p, assume_yes=True, out=lambda *_a: None,
+              verify=False)
     b1 = p + ".dim-backup"
     check("a backup exists", os.path.exists(b1))
     check("holding what was there", "THE ORIGINAL" in open(b1, encoding="utf-8").read())
 
     with open(p, "w", encoding="utf-8") as fh:
         json.dump({"theme": "edited since"}, fh)
-    I.install("claude", path=p, assume_yes=True, out=lambda *_a: None)
+    I.install("claude", path=p, assume_yes=True, out=lambda *_a: None,
+              verify=False)
     check("the first backup still holds the original",
           "THE ORIGINAL" in open(b1, encoding="utf-8").read(),
           open(b1, encoding="utf-8").read()[:60])
@@ -277,7 +281,8 @@ def test_a_leftover_backup_name_cannot_cost_the_original():
         json.dump({"leftover": "unrelated junk"}, fh)
 
     for _ in range(3):                     # same second, deliberately
-        I.install("claude", path=p, assume_yes=True, out=lambda *_a: None)
+        I.install("claude", path=p, assume_yes=True, out=lambda *_a: None,
+              verify=False)
 
     backups = [os.path.join(d, n) for n in os.listdir(d) if ".dim-backup" in n]
     pristine = [b for b in backups
@@ -308,7 +313,7 @@ def test_a_file_edited_while_the_prompt_waits_is_not_silently_reverted():
 
     try:
         I.install("claude", path=p, ask=meddle_then_agree,
-                  out=lambda *_a: None)
+                  out=lambda *_a: None, verify=False)
         check("the concurrent edit is refused, not overwritten", False,
               "install proceeded and reverted it")
     except I.InstallRefused as e:
@@ -325,7 +330,7 @@ def test_a_file_edited_while_the_prompt_waits_is_not_silently_reverted():
     with open(p2, "w", encoding="utf-8") as fh:
         json.dump({"theme": "dark"}, fh)
     path, added = I.install("claude", path=p2, ask=lambda _p: "y",
-                            out=lambda *_a: None)
+                            out=lambda *_a: None, verify=False)
     check("an untouched file installs normally", bool(added), added)
 
 
@@ -350,7 +355,8 @@ def test_the_statusline_install_also_refuses_a_file_changed_mid_prompt():
 
     try:
         I.install_statusline(command="dim statusline", path=p,
-                             ask=meddle_then_agree, out=lambda *_a: None)
+                             ask=meddle_then_agree, out=lambda *_a: None,
+                             verify=False)
         check("a statusline install refuses a changed file", False,
               "it proceeded and would have reverted the edit")
     except I.InstallRefused as e:
@@ -366,7 +372,8 @@ def test_the_statusline_install_also_refuses_a_file_changed_mid_prompt():
     with open(p2, "w", encoding="utf-8") as fh:
         json.dump({"theme": "dark"}, fh)
     got, _note = I.install_statusline(command="dim statusline", path=p2,
-                                      ask=lambda _p: "y", out=lambda *_a: None)
+                                      ask=lambda _p: "y", out=lambda *_a: None,
+                                      verify=False)
     check("an untouched file installs normally", got == p2, got)
 
 

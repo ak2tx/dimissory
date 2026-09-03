@@ -175,9 +175,9 @@ def test_setup_is_safe_to_rerun_and_never_blocks():
     lines1, lines2 = [], []
     with contextlib.redirect_stdout(io.StringIO()):
         rc1 = setup_mod.run(config_path=p, assume_yes=True, out=lines1.append,
-                            hook_paths=_sandbox(d))
+                            hook_paths=_sandbox(d), verify=False)
         rc2 = setup_mod.run(config_path=p, assume_yes=True, out=lines2.append,
-                            hook_paths=_sandbox(d))
+                            hook_paths=_sandbox(d), verify=False)
     check("first run succeeds", rc1 == 0, rc1)
     check("second run succeeds", rc2 == 0, rc2)
     joined1, joined2 = "\n".join(lines1), "\n".join(lines2)
@@ -217,7 +217,8 @@ def test_setup_cannot_reach_a_real_home():
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             setup_mod.run(config_path=p, assume_yes=True,
-                          out=lambda *_a: None, hook_paths=sandbox)
+                          out=lambda *_a: None, hook_paths=sandbox,
+                          verify=False)
     finally:
         I.install = real_install
 

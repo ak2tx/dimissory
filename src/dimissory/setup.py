@@ -52,7 +52,8 @@ def _ask(prompt, default=True, assume=None):
     return default if not answer else answer.startswith("y")
 
 
-def run(config_path=None, assume_yes=None, out=print, hook_paths=None):
+def run(config_path=None, assume_yes=None, out=print, hook_paths=None,
+        verify=True):
     """Guided setup. Safe to re-run; nothing here overwrites without asking.
 
     Returns an exit code. Every line printed is something that was checked,
@@ -153,7 +154,8 @@ def run(config_path=None, assume_yes=None, out=print, hook_paths=None):
             try:
                 path, added = I.install(key, command=command,
                                         path=(hook_paths or {}).get(key),
-                                        assume_yes=assume_yes, out=out)
+                                        assume_yes=assume_yes, out=out,
+                                        verify=verify)
             except I.InstallRefused as e:
                 out(f"    {I.TARGETS[key]['label']}: {e}")
                 refused.append(key)

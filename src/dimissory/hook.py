@@ -145,6 +145,51 @@ def hook_command():
     return dim_command() + " hook"
 
 
+def command_works(command=None, timeout=20):
+    """Whether that command actually runs. Returns (ok, why).
+
+    Because a hook that cannot run is this project's signature failure, and
+    the whole point of resolving an absolute path was to stop emitting one.
+    The resolution can still fall through to `<python> -m dimissory.cli`, and
+    that fallback is NOT self-sufficient: from a source checkout with nothing
+    installed, the interpreter has no way to find the package once the host
+    strips the environment.
+
+    Found by uninstalling dimissory and re-running the suite. The check that
+    asserts the command runs under `env -i` had been passing for two days
+    because the author had it installed -- a test measuring the developer's
+    machine rather than the code, which is the same defect class in the tool
+    that hunts it.
+
+    So this is run BEFORE writing a command into anybody's config. Refusing to
+    install beats installing something that silently does nothing.
+    """
+    import json as _json
+    import subprocess
+    command = command or hook_command()
+    probe = _json.dumps({"hook_event_name": "SessionStart",
+                         "session_id": "dimissory-selftest"})
+    try:
+        if os.name == "nt":
+            done = subprocess.run(command, shell=True, input=probe,
+                                  capture_output=True, text=True,
+                                  timeout=timeout)
+        else:
+            done = subprocess.run(["/bin/sh", "-c", command], input=probe,
+                                  capture_output=True, text=True,
+                                  timeout=timeout, env={"PATH": os.environ.get(
+                                      "PATH", "/usr/bin:/bin")})
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        return False, f"could not be run ({type(e).__name__})"
+    if done.returncode != 0:
+        first = (done.stderr or "").strip().splitlines()
+        return False, (f"exited {done.returncode}"
+                       + (f": {first[0][:120]}" if first else ""))
+    if "additionalContext" not in done.stdout:
+        return False, "ran, but did not answer a SessionStart payload"
+    return True, ""
+
+
 # WORDING IS PART OF THE MECHANISM, and this was measured the hard way.
 #
 # The first version explained the product, offered four command variants and

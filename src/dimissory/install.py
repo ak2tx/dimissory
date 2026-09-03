@@ -333,7 +333,7 @@ def plan_statusline(command, path=None):
 
 
 def install_statusline(command=None, path=None, assume_yes=False,
-                       out=print, ask=None):
+                       out=print, ask=None, verify=True):
     """Install `dim statusline` as Claude Code's statusLine. (path, note)."""
     if command is None:
         from .hook import dim_command
@@ -375,7 +375,7 @@ def install_statusline(command=None, path=None, assume_yes=False,
 
 
 def install(target, command=None, path=None, assume_yes=False,
-            out=print, ask=None):
+            out=print, ask=None, verify=True):
     """Install our hooks into one host. Returns (path, added) or (None, []).
 
     `command` defaults to the ABSOLUTE invocation for this environment, not to
@@ -385,6 +385,21 @@ def install(target, command=None, path=None, assume_yes=False,
     if command is None:
         from .hook import hook_command
         command = hook_command()
+    # VERIFIED BEFORE IT IS WRITTEN. A hook that cannot run is indistinguishable
+    # from a hook with nothing to say -- the failure this project keeps
+    # rediscovering -- and the command can legitimately resolve to something
+    # unrunnable: from a source checkout with nothing installed, the fallback
+    # `<python> -m dimissory.cli` cannot find its own package once the host
+    # strips the environment. Refusing to install beats installing silence.
+    if verify:
+        from .hook import command_works
+        ok, why = command_works(command)
+        if not ok:
+            raise InstallRefused(
+                f"the hook command does not work, so installing it would add a "
+                f"hook that silently does nothing.\n    command: {command}\n"
+                f"    {why}\n    Install dimissory (pip install dimissory) so "
+                f"`dim` resolves, then run this again. Nothing was changed.")
     spec = TARGETS[target]
     p = os.path.expanduser(path or spec["path"])
     existing, merged, added = plan(target, command, p)

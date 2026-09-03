@@ -67,20 +67,52 @@ def test_the_installed_command_is_absolute_not_a_bare_name():
           os.path.exists(exe.strip('"')), exe)
 
 
-def test_it_runs_with_no_environment_at_all():
-    """Not 'it is absolute' -- 'it runs'. The stronger claim, and the one the
-    user experiences. env -i is the harshest PATH a host could hand us."""
-    if os.name == "nt":
-        check("skipped on Windows (no /bin/sh)", True)
-        return
-    p = subprocess.run(["env", "-i", "/bin/sh", "-c", H.hook_command()],
-                       input=json.dumps({"hook_event_name": "SessionStart",
-                                         "session_id": "pkg-abs"}),
-                       capture_output=True, text=True, timeout=60)
-    check("exits 0 under an empty environment", p.returncode == 0,
-          f"rc={p.returncode} err={p.stderr[:80]}")
-    check("and still produces its SessionStart response",
-          "additionalContext" in p.stdout, p.stdout[:80])
+def test_a_command_that_cannot_run_is_never_installed():
+    """This test used to assert that the emitted command runs under `env -i`,
+    and it passed for two days because the AUTHOR had dimissory installed.
+    Uninstalling it turned the suite red -- a check measuring the developer's
+    machine rather than the code, which is this tool's own defect class.
+
+    The honest property is not "it always runs" (it cannot, from a source
+    checkout where the `<python> -m dimissory.cli` fallback has no way to find
+    its package once a host strips the environment). It is: WE NEVER WRITE A
+    COMMAND THAT DOES NOT RUN. A hook that cannot run is indistinguishable
+    from a hook with nothing to say.
+    """
+    ok, why = H.command_works()
+    check("command_works answers with a reason, not just a bool",
+          isinstance(ok, bool) and isinstance(why, str), (ok, why))
+    if ok:
+        check("this environment can run the emitted command", True)
+    else:
+        check(f"this environment cannot ({why[:60]}) -- and that is reported",
+              bool(why))
+
+    # Whatever the answer, install must AGREE with it.
+    d = tempfile.mkdtemp(prefix="dim-verify-")
+    p = os.path.join(d, "settings.json")
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"theme": "dark"}, fh)
+    try:
+        I.install("claude", path=p, assume_yes=True, out=lambda *_a: None)
+        installed = True
+    except I.InstallRefused as e:
+        installed = False
+        check("refusing says the hook would do nothing",
+              "silently does nothing" in str(e), str(e)[:90])
+    check("install proceeds exactly when the command works", installed == ok,
+          (installed, ok))
+
+    # And a command that definitely cannot run is always refused.
+    try:
+        I.install("claude", command="/nonexistent/dim hook", path=p,
+                  assume_yes=True, out=lambda *_a: None)
+        check("a broken command is refused", False, "it was written anyway")
+    except I.InstallRefused:
+        check("a broken command is refused", True)
+    check("and the file was not touched",
+          json.load(open(p, encoding="utf-8")) == {"theme": "dark"}
+          or installed, "file changed by a refused install")
 
     # The negative control: the thing we replaced must genuinely fail here,
     # otherwise this test is passing for a reason that has nothing to do with
@@ -209,7 +241,7 @@ def main():
     print(" packaging: the failures that only happen to somebody else")
     print("=" * 66)
     for t in (test_the_installed_command_is_absolute_not_a_bare_name,
-              test_it_runs_with_no_environment_at_all,
+              test_a_command_that_cannot_run_is_never_installed,
               test_a_path_with_a_space_survives_the_shell,
               test_every_form_of_our_command_is_recognised_as_ours,
               test_installing_twice_adds_nothing_the_second_time,
