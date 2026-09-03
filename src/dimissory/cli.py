@@ -573,13 +573,34 @@ def cmd_status(args):
     return 1
 
 
+class _Parser(argparse.ArgumentParser):
+    """A parser whose usage errors do NOT exit 2.
+
+    `dim resume` documents exit 2 as "this letter is stale", and argparse
+    exits 2 for a usage error. So a mistyped flag was indistinguishable from
+    a stale letter -- found by mistyping one while demonstrating the tool:
+    `dim resume --path X` exited 2 and read exactly like a real verdict.
+
+    That matters more here than in most tools, because exit 2 IS the product:
+    it is what a script or the next agent branches on. 64 is the conventional
+    EX_USAGE.
+    """
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(64, f"{self.prog}: error: {message}\n")
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="dim", description=__doc__.splitlines()[0])
+    p = _Parser(prog="dim", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"dimissory {__version__}")
     p.add_argument("--dir", help=f"where letters live (default: {DEFAULT_DIR})")
     p.add_argument("-c", "--config", help="config file (default: ~/.dimissory/config.toml)")
     p.add_argument("--journal", help="journal directory (default: ~/.dimissory/journal)")
-    sub = p.add_subparsers(dest="cmd")
+    # parser_class matters: every SUBparser makes its own usage errors, and
+    # without this they are plain ArgumentParsers that still exit 2 -- so
+    # `dim resume --typo` would keep reading as "this letter is stale".
+    sub = p.add_subparsers(dest="cmd", parser_class=_Parser)
 
     w = sub.add_parser("write", help="issue a letter now")
     w.add_argument("--session"); w.add_argument("--cwd")

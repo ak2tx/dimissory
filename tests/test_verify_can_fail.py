@@ -385,11 +385,36 @@ def test_a_multiline_expectation_stays_on_one_line():
           "two.py" in exp[0], "spilled")
 
 
+def test_a_usage_error_is_not_mistaken_for_a_stale_letter():
+    """Found by mistyping a flag while demonstrating the tool.
+
+    `dim resume` documents exit 2 as "this letter is stale", and argparse
+    exits 2 for a usage error. `dim resume --path X` therefore exited 2 and
+    read exactly like a real staleness verdict -- and exit 2 is the whole
+    point of resume, since it is what a script or another agent branches on.
+    """
+    env = {**os.environ, "PYTHONPATH": os.path.join(ROOT, "src")}
+
+    def run(*args):
+        return subprocess.run([sys.executable, "-m", "dimissory.cli", *args],
+                              capture_output=True, text=True, env=env,
+                              cwd=ROOT).returncode
+
+    check("a mistyped flag exits 64, not 2", run("resume", "--nope") == 64,
+          run("resume", "--nope"))
+    check("an unknown subcommand exits 64, not 2",
+          run("definitely-not-a-command") == 64,
+          run("definitely-not-a-command"))
+    check("a missing letter exits 1, which is neither",
+          run("resume", os.path.join(tempfile.mkdtemp(), "absent.md")) == 1)
+
+
 def main_():
     print("=" * 66)
     print(" the verify block fails when the world moved, or it is decoration")
     print("=" * 66)
-    for t in (test_a_letter_goes_stale_when_HEAD_moves,
+    for t in (test_a_usage_error_is_not_mistaken_for_a_stale_letter,
+              test_a_letter_goes_stale_when_HEAD_moves,
               test_a_letter_goes_stale_when_the_tree_changes,
               test_writing_the_letter_does_not_invalidate_the_letter,
               test_a_check_with_no_recorded_expectation_is_not_a_pass,
