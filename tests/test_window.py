@@ -143,18 +143,54 @@ def test_no_reading_is_not_the_same_as_plenty_of_room():
           W.should_seal(W.Window(85.0, observed_at=time.time()), 0.85) is True)
 
 
-def test_claude_has_no_on_disk_window_and_says_so():
+def test_claude_has_no_on_disk_PERCENTAGE_and_says_so_precisely():
     """The temptation is to derive a percentage from token consumption, which
     IS on disk. That is telemetry with no denominator, and turning it into a
-    fraction of a window would be inventing the number."""
-    check("read() offers no claude provider",
+    fraction of a window would be inventing the number.
+
+    The earlier version of this test pinned the phrase "NOT AVAILABLE ON DISK",
+    which turned out to be too strong: Claude transcripts DO carry a
+    structural quotaLimits object. It has no percentage in it, so the
+    conclusion held, but the stated reason was wrong -- and a wrong reason in
+    a comment is what stops the next person finding the real data.
+    """
+    check("read() still offers no claude provider, because there is no number",
           W.read(transcript="/nonexistent", provider="claude") is None)
     src = open(os.path.join(ROOT, "src", "dimissory", "window.py")).read()
-    check("and the module records why, so nobody adds it later",
-          "NOT AVAILABLE ON DISK" in src)
-    flat = " ".join(src.split())          # the phrase wraps across a line
+    flat = " ".join(src.split())
+    check("the module says what is actually missing: the percentage",
+          "NO UTILIZATION PERCENTAGE ON DISK" in src)
+    check("and does not claim the whole object is absent",
+          "NOT AVAILABLE ON DISK" not in src)
     check("naming consumption as the trap",
           "consumption without a denominator" in flat)
+
+
+def test_claudes_quota_tombstone_is_read_but_never_used_as_a_meter():
+    """quotaLimits says the wall WAS hit and when it reopens. Measured on 81
+    real records: every one is status "rejected" and none carries a
+    percentage. Useful in a letter, useless as a trigger."""
+    d = tempfile.mkdtemp(prefix="dim-cl-")
+    p = os.path.join(d, "t.jsonl")
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 60))
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "user", "timestamp": ts}) + "\n")
+        fh.write(json.dumps({
+            "timestamp": ts,
+            "quotaLimits": {"status": "rejected", "resetsAt": 1788398400,
+                            "rateLimitType": "five_hour",
+                            "isUsingOverage": False}}) + "\n")
+    wall = W._claude_wall(p)
+    check("the tombstone is read", wall is not None)
+    check("with the reset time", wall and wall["resets_at"] == 1788398400, wall)
+    check("and which window it was", wall and wall["kind"] == "five_hour", wall)
+    check("it is NOT a Window object", not isinstance(wall, W.Window))
+    check("it carries no percentage to be mistaken for one",
+          wall and not any("percent" in k for k in wall), wall)
+    check("and read() still returns nothing for claude",
+          W.read(transcript=p, provider="claude") is None)
+    check("no tombstone means None", W._claude_wall(
+        os.path.join(d, "absent.jsonl")) is None)
 
 
 def test_a_missing_or_unreadable_transcript_is_none_not_an_error():
@@ -191,7 +227,8 @@ def main():
               test_a_stale_reading_is_refused_not_returned,
               test_an_undateable_reading_is_refused,
               test_no_reading_is_not_the_same_as_plenty_of_room,
-              test_claude_has_no_on_disk_window_and_says_so,
+              test_claude_has_no_on_disk_PERCENTAGE_and_says_so_precisely,
+              test_claudes_quota_tombstone_is_read_but_never_used_as_a_meter,
               test_a_missing_or_unreadable_transcript_is_none_not_an_error,
               test_grok_reads_its_own_billing_log):
         t()

@@ -16,14 +16,29 @@ WHERE THE NUMBER COMES FROM, measured per provider rather than assumed:
           creditUsagePercent. Account-wide -- every device and product, not
           just this host -- which is the number that actually matters.
 
-  Claude  NOT AVAILABLE ON DISK. The five_hour/seven_day utilization pair is
-          emitted in a stream-json rate_limit event and is never written to the
-          transcript. The predecessor project needed a supervising process
-          wrapping the CLI to catch it in flight. Nothing in a hook payload
-          carries it either.
+  Claude  NO UTILIZATION PERCENTAGE ON DISK -- but not nothing, and the
+          earlier blanket claim here was wrong. Claude Code transcripts DO
+          carry a structural `quotaLimits` object:
 
-That last one is a real limitation and it is reported as UNMEASURED rather than
-estimated. Token consumption IS on disk for Claude, but consumption without a
+              {"status": "rejected", "resetsAt": 1788398400,
+               "rateLimitType": "five_hour", "isUsingOverage": false, ...}
+
+          Measured across 81 records in 81 transcripts on a real machine:
+          every single one has status "rejected", and NO key in any of them
+          holds a percentage, a utilization or a used figure. It is written
+          when the limit has ALREADY been hit.
+
+          So it is a tombstone, not a meter: it tells you the wall was hit and
+          when the window reopens, which is worth putting in a letter, and it
+          cannot tell you that you are at 85%. `_claude_wall` reads it for the
+          reset time; `read` still returns no Window for Claude, because there
+          is no percentage to return.
+
+The five_hour/seven_day UTILIZATION pair is emitted only in a stream-json
+rate_limit event, never written to the transcript -- the predecessor needed a
+supervising process wrapping the CLI to catch it in flight. So Claude has no
+before-the-wall meter, and that is reported as UNMEASURED rather than
+estimated. Token consumption IS on disk, but consumption without a
 denominator is telemetry, not a fraction of a window, and turning it into a
 percentage would be inventing the number this whole project exists not to
 invent.
@@ -182,6 +197,49 @@ def _grok(root=None):
     if pct is None:
         return None
     return Window(pct, source="grok", observed_at=_epoch(d.get("ts")))
+
+
+def _claude_wall(transcript):
+    """Claude's quota tombstone: the wall was hit, and when it reopens.
+
+    Deliberately NOT a Window and deliberately not wired into `read`. There is
+    no percentage in this object, so it cannot say "you are at 85%" -- only
+    "you were refused". Returning it as a Window would put a fabricated
+    used_percent into the one number the seal decision is made on.
+
+    What it is good for is the letter: "your five_hour window reopens at
+    20:20" is a real observed fact, and it is the first question the person
+    reading a handoff actually has.
+    """
+    if not transcript or not os.path.exists(transcript):
+        return None
+    latest = None
+    try:
+        with open(transcript, "rb") as fh:
+            size = os.path.getsize(transcript)
+            if size > 2_000_000:
+                fh.seek(size - 2_000_000)
+                fh.readline()
+            for raw in fh:
+                if b'"quotaLimits"' not in raw:
+                    continue
+                try:
+                    d = json.loads(raw)
+                except ValueError:
+                    continue
+                q = d.get("quotaLimits")
+                if isinstance(q, dict) and q.get("resetsAt"):
+                    latest = (q, _epoch(d.get("timestamp")))
+    except OSError:
+        return None
+    if not latest:
+        return None
+    q, at = latest
+    return {"kind": q.get("rateLimitType"),
+            "status": q.get("status"),
+            "resets_at": q.get("resetsAt"),
+            "observed_at": at,
+            "source": "claude"}
 
 
 def _epoch(value):
