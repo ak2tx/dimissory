@@ -227,8 +227,14 @@ def _number(value, fallback):
     return value if isinstance(value, (int, float)) else fallback
 
 
-def _no_meter(sid, payload, journal_root, letters_dir, cfg):
-    """What to do on a host with no percentage: watch for the wall itself.
+def _wall_hit(sid, payload, journal_root, letters_dir, cfg):
+    """Seal because the host says a limit was actually refused.
+
+    Named for what it detects rather than for what is missing. It was
+    `_no_meter`, called only when there was no percentage at all, and that
+    framing is what produced the regression: once Claude HAD a percentage, a
+    sub-threshold one silenced this path entirely. The wall being hit is not
+    the absence of a meter, it is a separate and stronger fact.
 
     Claude publishes no utilization figure anywhere on disk, so there is no
     85% to seal at. It DOES write a `quotaLimits` tombstone once a limit has
@@ -315,25 +321,31 @@ def _handle(payload, journal_root, letters_dir):
     # and the difference from every tool that reacts to a 429.
     if event in ("posttooluse", "posttoolusefailure"):
         from . import window as _W
-        from .config import Config, seconds
+        from .config import Config, seconds, write_at
         cfg = Config.load(None)
         win = _W.read(transcript=field(payload, "transcript"))
-        # `write_at` read WITHOUT `or`. `cfg.get(...) or 0.85` turned a
-        # configured 0 into 0.85, so the one setting that means "always seal"
-        # silently could not.
-        at = cfg.get("window", "write_at")
-        at = float(at) if isinstance(at, (int, float)) else 0.85
-        due = _W.should_seal(win, at)
+        # Shared with `dim status` so the two cannot disagree about the
+        # margin, and bool-safe: `write_at = false` was becoming 0.0, which
+        # means "always seal", because bool subclasses int.
+        due = _W.should_seal(win, write_at(cfg))
         # None and False are different answers and this used to collapse them.
         # should_seal goes out of its way to distinguish "no meter at all" from
         # "plenty of room left"; discarding that one line later made a Claude
         # session -- which has no meter -- indistinguishable from a session
         # with budget to spare, which is the exact conflation this project's
         # UNMEASURED singleton exists to prevent.
-        if due is None:
-            return _no_meter(sid, payload, journal_root, letters_dir, cfg)
-        if due is False:
-            return ""
+        if due is not True:
+            # BOTH None and False come here, and that is the fix for a
+            # regression the statusline work introduced. Gating this on `due
+            # is None` alone meant a working-but-sub-threshold meter SILENCED
+            # the at-the-wall path: measured, a fresh 84% cache plus a live
+            # `quotaLimits` rejection produced NO letter, where deleting the
+            # cache produced one. Installing the meter made Claude worse.
+            #
+            # A rejection is ground truth. The percentage is a sample, and it
+            # can be under the margin, stale, or from the other window; none
+            # of that outranks the host telling us it just refused a request.
+            return _wall_hit(sid, payload, journal_root, letters_dir, cfg)
 
         # Seal once per window, then refresh at an interval. A letter written
         # at 85% and never touched again is describing a session that has
@@ -462,41 +474,12 @@ def seal(sid, payload, journal_root=None, letters_dir=None):
                                                our_dirs=ours,
                                                porcelain=porcelain))
     os.makedirs(letters, exist_ok=True)
-    # THE NAME IS CLAIMED, NOT COMPOSED AND HOPED FOR.
-    #
-    # This used to be one `open(path, "w")` on a name with one-second
-    # resolution. Registering PostToolUse put that line on the one event hosts
-    # run CONCURRENTLY, and review measured the result: two seals in the same
-    # second opened the same path and the last writer won -- losing an UPGRADED
-    # letter to the degraded one it was meant to replace, while the seal marker
-    # recorded the upgrade as done. The letter is the artifact this package
-    # exists to produce, so that is the worst possible place for a race.
-    #
-    # A pid and a microsecond stamp would make a collision unlikely. O_EXCL
-    # makes it impossible, across processes and within one, which is the same
-    # reasoning install._backup now uses for the same class of bug.
-    #
-    # It also invalidated a test of mine: the grace test slept 1.05s "because
-    # letter names are second-resolution", working around this rather than
-    # catching it. Sleeping past a race does not remove it.
-    # The counter is ALWAYS present and zero-padded so that sorting by name
-    # gives the same order as sorting by time. An unpadded, sometimes-absent
-    # suffix does not: "-1.md" sorts BEFORE ".md", because '-' is 0x2D and '.'
-    # is 0x2E, so the newest letter of a second stopped being the last one by
-    # name. `_latest` uses mtime and was unaffected, but leaving the two
-    # orderings disagreeing is a trap for the next reader -- and it caught a
-    # test in this suite within minutes of the change.
-    base = f"{sid[:60]}-{time.strftime('%Y%m%dT%H%M%S')}"
-    for n in range(1000):
-        path = os.path.join(letters, f"{base}-{n:03d}.md")
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(render(brief))
-        return path
-    return None
+    # One owner for the naming rule -- see letters.py. It was fixed here
+    # first and NOT in `dim write` or the setup proof letter, which review
+    # then found still clobbering same-second names. A fix that lives in a
+    # caller instead of a function gets to be found twice.
+    from . import letters as _L
+    return _L.write(letters, sid, render(brief))
 
 
 def main(argv=None, stdin=None):

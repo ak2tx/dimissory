@@ -353,23 +353,43 @@ def _claude(cache_root=None):
         return None
     if not isinstance(blob, dict):
         return None
-    at = blob.get("observed_at")
-    at = float(at) if isinstance(at, (int, float)) else None
+    # VALIDATED HERE TOO, not only where it was written. This is a file on
+    # disk that becomes OBSERVED in a letter -- under a heading saying it was
+    # established by dimissory rather than claimed by the agent -- so the
+    # reader cannot assume the writer was this version of this program. An
+    # edited, corrupted or poisoned cache could otherwise assert 1000000%
+    # (seal now, forever), `inf` (the same), or NaN (every comparison false,
+    # so it reads as budget to spare while breaking any ordering).
+    from .statusline import percentage, reset_time
+    if blob.get("source") not in (None, "claude"):
+        return None
+    at = reset_time(blob.get("observed_at"))
     now = time.time()
     live = []
     for w in blob.get("windows") or []:
         if not isinstance(w, dict):
             continue
-        pct = w.get("used_percent")
-        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+        pct = percentage(w.get("used_percent"))
+        if pct is None:
             continue
-        resets = w.get("resets_at")
-        if isinstance(resets, (int, float)) and resets <= now:
+        resets = reset_time(w.get("resets_at"))
+        if resets is not None and resets <= now:
             continue                  # this window has already turned over
-        live.append((float(pct), w.get("label") or "claude", resets))
+        label = w.get("label")
+        if not isinstance(label, str) or not label or len(label) > 64 \
+                or any(c < " " for c in label):
+            label = "claude"          # never put control characters in a letter
+        live.append((pct, label, resets))
     if not live:
         return None
-    live.sort(reverse=True)           # binding window first
+    # Sorted by an EXPLICIT key. `live.sort(reverse=True)` compared whole
+    # tuples, so two windows with equal percentage and label -- possible in a
+    # hand-edited or duplicated cache -- fell through to comparing a None
+    # resets_at against a float and raised TypeError. `handle` swallows every
+    # exception, so the seal became a silent no-op: the loudest possible bug
+    # reduced to the quietest. This is the same mixed-type comparison `rank()`
+    # was written to kill in `_codex`, reintroduced on the Claude path.
+    live.sort(key=lambda row: row[0], reverse=True)
     pct, label, resets = live[0]
     win = Window(pct, None, resets, source="claude", observed_at=at)
     win.fixed_label = label

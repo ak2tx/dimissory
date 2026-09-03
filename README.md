@@ -149,9 +149,19 @@ an interface it already invokes on its own schedule.
 
 ### Known gaps, stated plainly
 
-`codex exec` fires `UserPromptSubmit` but not `PostToolUse`, so
-non-interactive Codex runs have no seal path at all. Interactive Codex is
-fine.
+**Non-interactive runs have no meter, on either vendor.** `codex exec` fires
+`UserPromptSubmit` but not `PostToolUse`, so it has no seal path at all.
+`claude -p`, the SDK, and `--safe-mode` have no status bar, so nothing records
+Claude's window there either. Both are the same shape of gap: the interface
+that carries the number only exists in the interactive TUI.
+
+**The sample clock and the seal clock are different clocks.** The seal fires
+on tool calls; the statusline does *not* — Claude Code re-renders on session
+start, each new assistant message, `/compact`, and a `refreshInterval` timer.
+A long single tool call or a long reasoning stretch leaves the reading frozen
+in between. Install therefore sets `refreshInterval` so the sample refreshes
+on a timer, and a reading older than an hour is refused outright rather than
+trusted.
 
 ### The gate is a request, not a guarantee
 

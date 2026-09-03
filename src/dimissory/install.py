@@ -83,11 +83,28 @@ WINDOW_EVENT = "PostToolUse"
 # already there -- silently, since duplicates still fire.
 MARKERS = ("dim hook", "dimissory hook", "dimissory.cli hook")
 
-# How we recognise our own statusline entry. Distinct from the hook
-# markers because a statusline that WRAPS someone else's contains both
-# their command and ours, and confusing the two would either refuse to
-# install or wrap ourselves recursively on the next run.
-STATUSLINE_MARKER = "statusline"
+# How we recognise our own statusline entry.
+#
+# This was the bare substring "statusline", and both R3 reviewers found it
+# independently. Measured: it matches `~/.claude/statusline.sh` -- THE PATH IN
+# CLAUDE CODE'S OWN DOCUMENTATION -- and `claude-code-statusline`, and
+# `powerline-statusline`, and anything else with the word in it. Install then
+# reported "already installed" and did nothing, so the meter was never
+# recorded, `dim status` told the user to run `--install`, and running it
+# again did nothing again.
+#
+# That is this lineage's signature defect -- a no-op reported as success --
+# landing on the single step the whole feature depends on. Same shape as the
+# hook MARKERS now: match OUR command and OUR subcommand, not a word.
+STATUSLINE_MARKERS = ("dim statusline", "dimissory statusline",
+                      "dimissory.cli statusline")
+STATUSLINE_MARKER = STATUSLINE_MARKERS[0]        # kept for callers and tests
+
+
+def is_our_statusline(entry):
+    """Whether a statusLine value is one we wrote, in any resolved form."""
+    blob = entry if isinstance(entry, str) else json.dumps(entry)
+    return any(m in blob for m in STATUSLINE_MARKERS)
 MARKER = MARKERS[0]                          # kept: callers and tests use it
 
 
@@ -255,29 +272,41 @@ def plan_statusline(command, path=None):
                 f"to rewrite it. Nothing was changed.")
 
     current = existing.get("statusLine")
+    if current is not None and is_our_statusline(current):
+        return existing, dict(existing), "already installed"
     theirs = None
+    keep = {}
     if isinstance(current, dict):
-        if STATUSLINE_MARKER in json.dumps(current):
-            return existing, dict(existing), "already installed"
         theirs = current.get("command")
+        # `padding` and `refreshInterval` are Claude Code's own statusLine
+        # settings and they were being DROPPED on install. refreshInterval
+        # matters most: it is the only knob that re-samples while the session
+        # is idle, which is exactly the gap this meter has.
+        keep = {k: v for k, v in current.items()
+                if k not in ("type", "command")}
     elif isinstance(current, str) and current:
         theirs = current                      # the older string form
-        if STATUSLINE_MARKER in current:
-            return existing, dict(existing), "already installed"
 
     if theirs:
-        # Quote it as one argument: `--wrap` takes a single command string and
-        # splits it itself, so an unquoted path with a space in it would
-        # arrive as two arguments and their statusline would never run.
-        import shlex
-        full = f"{command} --wrap {shlex.quote(str(theirs))}"
+        # Quoted for the platform that will actually split it. `shlex.quote`
+        # emits POSIX single quotes, which cmd.exe passes through as literal
+        # characters -- hook._quote exists for precisely this and was not
+        # being used here, so the same bug class had a new call site.
+        from .hook import _quote
+        full = f"{command} --wrap {_quote(str(theirs))}"
         note = f"wrapping the existing statusline: {theirs}"
     else:
         full = command
         note = "no statusline was set"
 
     merged = dict(existing)
-    merged["statusLine"] = {"type": "command", "command": full}
+    block = {"type": "command", "command": full}
+    block.update(keep)                    # their padding/refreshInterval survive
+    # Without a refresh, the sample only updates when Claude Code re-renders --
+    # which is NOT on tool calls. A long tool or reasoning stretch freezes the
+    # reading while the seal heartbeat keeps firing, so the two clocks drift.
+    block.setdefault("refreshInterval", 60000)
+    merged["statusLine"] = block
     return existing, merged, note
 
 

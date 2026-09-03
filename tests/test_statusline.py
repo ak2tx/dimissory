@@ -87,8 +87,8 @@ def test_the_captured_payload_yields_both_windows():
           abs(got[1]["used_percent"] - 58.0) < 0.01, got[1])
     check("each window is labelled",
           [w["label"] for w in got] == ["claude 5h", "claude 7d"], got)
-    check("and carries a reset time",
-          all(isinstance(w["resets_at"], int) for w in got), got)
+    check("and carries a reset time (normalised to a float)",
+          all(isinstance(w["resets_at"], float) for w in got), got)
 
 
 def test_a_third_window_on_a_newer_version_is_not_dropped():
@@ -306,6 +306,189 @@ def test_an_unreadable_settings_file_is_refused_not_rewritten():
           == before)
 
 
+def test_the_marker_does_not_match_someone_elses_statusline():
+    """Both R3 reviewers found this independently, and it was the highest
+    severity in the tree: the marker was the bare word "statusline", so
+    `~/.claude/statusline.sh` -- THE PATH IN CLAUDE CODE'S OWN DOCS -- was read
+    as "already installed". Install did nothing, reported success, and the
+    meter was never recorded. Then `dim status` said to run --install, and
+    running it did nothing again."""
+    for theirs in ("~/.claude/statusline.sh", "claude-code-statusline",
+                   "/usr/bin/powerline-statusline", "~/bin/my-statusline.py",
+                   "starship prompt --statusline"):
+        d = tempfile.mkdtemp(prefix="dim-mk-")
+        p = os.path.join(d, "settings.json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"statusLine": {"type": "command", "command": theirs}}, fh)
+        _e, merged, note = I.plan_statusline("dim statusline", p)
+        check(f"{theirs[:34]:34} is not mistaken for ours",
+              note != "already installed", note)
+        check(f"{theirs[:34]:34} gets wrapped",
+              "--wrap" in merged["statusLine"]["command"],
+              merged["statusLine"]["command"])
+    for ours in ("dim statusline", "/x/bin/dim statusline --wrap 'foo'",
+                 '"/py" -m dimissory.cli statusline'):
+        d = tempfile.mkdtemp(prefix="dim-mk2-")
+        p = os.path.join(d, "settings.json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"statusLine": {"type": "command", "command": ours}}, fh)
+        _e, _m, note = I.plan_statusline("dim statusline", p)
+        check(f"but OUR own form is recognised: {ours[:30]}",
+              note == "already installed", note)
+
+
+def test_claude_codes_own_statusline_settings_are_not_thrown_away():
+    """`padding` and `refreshInterval` belong to Claude Code, not us.
+    refreshInterval matters most: it is the only knob that re-samples while
+    the session is idle, which is exactly this meter's weak spot."""
+    d = tempfile.mkdtemp(prefix="dim-keep-")
+    p = os.path.join(d, "settings.json")
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"statusLine": {"type": "command", "command": "bar.sh",
+                                  "padding": 0, "refreshInterval": 5000}}, fh)
+    _e, merged, _n = I.plan_statusline("dim statusline", p)
+    block = merged["statusLine"]
+    check("padding survives", block.get("padding") == 0, block)
+    check("their refreshInterval survives, not ours",
+          block.get("refreshInterval") == 5000, block)
+
+    # And with nothing set, we ask for one, because otherwise the sample only
+    # updates when Claude Code re-renders -- which is NOT on tool calls.
+    d2 = tempfile.mkdtemp(prefix="dim-keep2-")
+    p2 = os.path.join(d2, "settings.json")
+    with open(p2, "w", encoding="utf-8") as fh:
+        json.dump({"theme": "dark"}, fh)
+    _e2, merged2, _n2 = I.plan_statusline("dim statusline", p2)
+    check("a refresh interval is requested when none was set",
+          isinstance(merged2["statusLine"].get("refreshInterval"), int),
+          merged2["statusLine"])
+
+
+def test_a_number_nobody_could_have_measured_is_refused():
+    """`isinstance(v, (int, float))` admits True, NaN and inf. Each is a live
+    defect in the one number that decides when to seal: inf seals forever, NaN
+    reads as budget while breaking every ordering, and bool subclasses int."""
+    for bad in (float("nan"), float("inf"), float("-inf"), True, False,
+                -1, 1001, "85", None, [85]):
+        check(f"{bad!r} is not a percentage", S.percentage(bad) is None,
+              S.percentage(bad))
+    for good in (0, 0.0, 58.0, 100, 100.0, 250.5):
+        check(f"{good!r} is", S.percentage(good) == float(good))
+    check("a NaN reset is refused (NaN <= now is False, so it never expires)",
+          S.reset_time(float("nan")) is None)
+    for bad in (0, -1, 1, 99, float("inf"), True, "soon"):
+        check(f"reset {bad!r} is refused", S.reset_time(bad) is None)
+
+    # And the READER validates too, because the cache is a file that a letter
+    # then presents as OBSERVED.
+    c = _cache()
+    for pct in (float("inf"), 1e12, float("nan")):
+        with open(c, "w", encoding="utf-8") as fh:
+            json.dump({"observed_at": time.time(), "source": "claude",
+                       "windows": [{"kind": "five_hour", "label": "claude 5h",
+                                    "used_percent": pct,
+                                    "resets_at": time.time() + 3600}]}, fh)
+        check(f"a cache claiming {pct} yields no window",
+              W._claude(c) is None, W._claude(c))
+
+
+def test_two_windows_with_the_same_percentage_do_not_crash_the_sort():
+    """`live.sort(reverse=True)` compared whole tuples, so equal percentage and
+    equal label fell through to comparing None against a float -- TypeError,
+    swallowed by handle(), seal silently skipped. The same mixed-type
+    comparison `rank()` was written to kill in `_codex`."""
+    c = _cache()
+    with open(c, "w", encoding="utf-8") as fh:
+        json.dump({"observed_at": time.time(), "source": "claude", "windows": [
+            {"kind": "a", "label": "claude", "used_percent": 50.0,
+             "resets_at": None},
+            {"kind": "b", "label": "claude", "used_percent": 50.0,
+             "resets_at": time.time() + 3600}]}, fh)
+    try:
+        w = W._claude(c)
+        check("a duplicated percentage and label does not raise", True)
+        check("and a window still comes back", w is not None, w)
+    except TypeError as e:
+        check("a duplicated percentage and label does not raise", False, str(e))
+
+
+def test_one_session_cannot_erase_anothers_window():
+    """Each window can be absent on its own, and two sessions on one account
+    do not always report the same pair. Whole-file replace let session B, which
+    only saw the weekly cap, delete session A's 95% five-hour reading -- the
+    one about to stop the work."""
+    c = _cache()
+    now = time.time()
+    S.record({"rate_limits": {
+        "five_hour": {"used_percentage": 95, "resets_at": int(now + 3600)},
+        "seven_day": {"used_percentage": 40, "resets_at": int(now + 86400)}}}, c)
+    S.record({"rate_limits": {
+        "seven_day": {"used_percentage": 41, "resets_at": int(now + 86400)}}}, c)
+    kinds = {w["kind"]: w["used_percent"]
+             for w in json.load(open(c, encoding="utf-8"))["windows"]}
+    check("the five-hour reading survives a weekly-only report",
+          abs(kinds.get("five_hour", -1) - 95.0) < 1e-9, kinds)
+    check("and the weekly one is updated", abs(kinds["seven_day"] - 41.0) < 1e-9,
+          kinds)
+
+    # Within one window, usage cannot go down -- a lower reading for the SAME
+    # resets_at is a late sample, not a decrease.
+    S.record({"rate_limits": {
+        "five_hour": {"used_percentage": 12, "resets_at": int(now + 3600)}}}, c)
+    kinds = {w["kind"]: w["used_percent"]
+             for w in json.load(open(c, encoding="utf-8"))["windows"]}
+    check("a late lower sample does not undo a higher one",
+          abs(kinds["five_hour"] - 95.0) < 1e-9, kinds)
+    # But a real rollover does.
+    S.record({"rate_limits": {
+        "five_hour": {"used_percentage": 3, "resets_at": int(now + 9999)}}}, c)
+    kinds = {w["kind"]: w["used_percent"]
+             for w in json.load(open(c, encoding="utf-8"))["windows"]}
+    check("a genuine rollover does", abs(kinds["five_hour"] - 3.0) < 1e-9, kinds)
+
+
+def test_the_cache_is_not_world_readable():
+    """It holds the numbers a letter presents as OBSERVED. Letters and the
+    journal are 0o600; this was whatever the umask happened to be."""
+    c = _cache()
+    S.record(_payload(), c)
+    mode = os.stat(c).st_mode & 0o777
+    check(f"mode is 0o600, not 0o{mode:o}", mode == 0o600, oct(mode))
+
+
+def test_a_wrapped_shell_command_still_means_what_it_meant():
+    """Claude Code runs `statusLine.command` through a shell, and the example
+    in its own documentation is a `jq` pipeline. `shlex.split` with no shell
+    silently changed the meaning of every command with a pipe, a redirect or
+    an `&&`: measured, `echo hello && echo world` printed the second half as a
+    literal argument."""
+    for cmd, want in (("echo hello && echo world", "hello\nworld\n"),
+                      ("printf 'a b' | tr ' ' '-'", "a-b"),
+                      ("echo one; echo two", "one\ntwo\n")):
+        out = io.StringIO()
+        real = sys.stdout
+        sys.stdout = out
+        try:
+            S.main(["--cache", _cache(), "--wrap", cmd],
+                   stdin=io.StringIO(json.dumps(_payload())))
+        finally:
+            sys.stdout = real
+        check(f"{cmd!r} runs as a shell command",
+              out.getvalue() == want, repr(out.getvalue()))
+
+    # A command that fails silently must not leave an empty bar with no clue.
+    out = io.StringIO()
+    real = sys.stdout
+    sys.stdout = out
+    try:
+        S.main(["--cache", _cache(), "--wrap", "exit 7"],
+               stdin=io.StringIO(json.dumps(_payload())))
+    finally:
+        sys.stdout = real
+    check("a silent non-zero exit is reported, not swallowed",
+          "exited 7" in out.getvalue(), repr(out.getvalue()))
+
+
 def main():
     print("=" * 68)
     print(" claude's meter: recorded off the statusline, not scraped off a PTY")
@@ -322,7 +505,14 @@ def main():
               test_it_prints_something_worth_looking_at,
               test_installing_wraps_an_existing_statusline_instead_of_taking_it,
               test_installing_twice_does_not_wrap_ourselves,
-              test_an_unreadable_settings_file_is_refused_not_rewritten):
+              test_an_unreadable_settings_file_is_refused_not_rewritten,
+              test_the_marker_does_not_match_someone_elses_statusline,
+              test_claude_codes_own_statusline_settings_are_not_thrown_away,
+              test_a_number_nobody_could_have_measured_is_refused,
+              test_two_windows_with_the_same_percentage_do_not_crash_the_sort,
+              test_one_session_cannot_erase_anothers_window,
+              test_the_cache_is_not_world_readable,
+              test_a_wrapped_shell_command_still_means_what_it_meant):
         t()
     print("\n" + "=" * 68)
     print(f" {'PASS' if not FAILED else 'FAIL'} {RAN - len(FAILED)}/{RAN}"

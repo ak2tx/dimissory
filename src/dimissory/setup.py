@@ -205,8 +205,14 @@ def run(config_path=None, assume_yes=None, out=print, hook_paths=None):
         if sl_path and note != "declined":
             steps.append(("meter", f"claude: {note}"))
         else:
-            steps.append(("meter", "claude: NOT installed -- Claude will only "
-                                   "get a letter AT the wall, not before it"))
+            # "failed:" is load-bearing -- it is what the exit code below
+            # matches on. Review measured this exact step reporting
+            # "NOT installed" and still exiting 0, so `dim setup --yes` was
+            # green on a box where Claude could never seal before the wall.
+            # The comment above says leaving the step out would repeat this
+            # file's documented sin; the exit code did it anyway.
+            steps.append(("meter", "failed: claude NOT metered -- Claude will "
+                                   "only get a letter AT the wall, not before"))
 
     # 5. Prove it works, rather than asserting it does.
     out("")
@@ -219,10 +225,11 @@ def run(config_path=None, assume_yes=None, out=print, hook_paths=None):
         o = observe(cwd=os.getcwd())
         b = Brief(session="setup-check", observed=o, declared=Declared(),
                   checks=checks_for(o))
-        path = os.path.join(d, f"setup-check-{time.strftime('%Y%m%dT%H%M%S')}.md")
+        from . import letters as _L
         try:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(render(b))
+            path = _L.write(d, "setup-check", render(b))
+            if path is None:
+                raise OSError(f"could not claim a letter name in {d}")
             measured = sorted(o.known())
             out(f"  wrote {path}")
             out(f"  it measured: {', '.join(measured) or 'nothing'}")

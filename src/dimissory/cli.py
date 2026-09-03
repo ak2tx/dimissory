@@ -67,7 +67,13 @@ def cmd_write(args):
     cwd = args.cwd or os.getcwd()
     _d0 = _letters_dir(args)
     _j0 = os.path.expanduser(args.journal or "~/.dimissory/journal")
-    o = observe(cwd=cwd, transcript=args.transcript, our_dirs=(_d0, _j0))
+    # The meter, which `dim write` never recorded. A hand-issued letter had
+    # no window line at all while a hook-sealed one did, so the two documents
+    # disagreed about what had been observed for no reason a reader could see.
+    from . import window as _W
+    _win = _W.read(transcript=args.transcript)
+    o = observe(cwd=cwd, transcript=args.transcript, our_dirs=(_d0, _j0),
+                window=_win.as_dict() if _win else None)
     from .observe import _exclude_pathspec, _git
     _d, _j = _d0, _j0
     _ours = (_d, _j)
@@ -103,11 +109,11 @@ def cmd_write(args):
                           else None),
     )
     d = _letters_dir(args)
-    os.makedirs(d, exist_ok=True)
-    import time
-    path = os.path.join(d, f"{brief.session}-{time.strftime('%Y%m%dT%H%M%S')}.md")
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(render(brief))
+    from . import letters as _L
+    path = _L.write(d, brief.session, render(brief))
+    if path is None:
+        print(f"could not write a letter into {d}", file=sys.stderr)
+        return 1
     print(path)
     if brief.is_degraded:
         print("  DEGRADED: no agent-written half. Machine-derived facts only.",
@@ -363,6 +369,24 @@ def cmd_config(args):
     return 0
 
 
+def _statusline_installed(path=None):
+    """Whether Claude Code is configured to run OUR statusline.
+
+    Needed so `dim status` can tell "you never installed the meter" from
+    "the meter is installed and every window has simply reset". Telling
+    somebody to install what they already installed is how a tool loses their
+    trust in everything else it reports.
+    """
+    from . import install as I
+    try:
+        p = os.path.expanduser(path or I.TARGETS["claude"]["path"])
+        with open(p, encoding="utf-8") as fh:
+            current = json.load(fh).get("statusLine")
+    except (OSError, ValueError, AttributeError, KeyError):
+        return False
+    return current is not None and I.is_our_statusline(current)
+
+
 def _when(epoch):
     """A reset time a person can act on.
 
@@ -441,58 +465,107 @@ def cmd_status(args):
               file=sys.stderr)
 
     detected = I.detect()
-    at = cfg.get("window", "write_at")
-    at = float(at) if isinstance(at, (int, float)) else 0.85
+    from .config import write_at
+    at = write_at(cfg)
     print(f"seal at        {at * 100:.0f}% of a plan window")
     print(f"letters        {cfg.letters_dir}")
     print()
 
-    rows, any_meter = [], False
+    # READINESS IS PER AGENT, and only counts for agents that are installed.
+    # Review measured four separate lies in the previous version: a stray Grok
+    # billing log made it exit 0 with no Grok CLI and no hooks anywhere; a
+    # working Codex box exited 1 because Codex is per-session and never set
+    # the flag; four-of-five hooks printed a bare "no"; and an EXPIRED Claude
+    # window printed "run `dim statusline --install`" when the statusline was
+    # installed and working, the window had simply reset.
+    rows, ready = [], []
     for key in ("claude", "codex", "grok"):
+        on_path = bool(detected.get(key))
         installed = "-"
         try:
-            _e, _m, added = I.plan(key, "dim hook", None)
-            installed = "no" if added else "yes"
+            # `plan` returns the events it WOULD add, so an empty list means
+            # everything is already there. Reducing that to yes/no threw away
+            # the useful half: four-of-five installed printed a bare "no",
+            # which reads as "nothing is set up" when the only thing missing
+            # might be the one event that matters.
+            _existing, _merged, missing = I.plan(key, "dim hook", None)
+            total = len(I.TARGETS[key]["events"])
+            if not missing:
+                installed = "yes"
+            elif len(missing) == total:
+                installed = "no"
+            else:
+                installed = f"{total - len(missing)}/{total}"
         except I.InstallRefused:
             installed = "refused"
         except (OSError, KeyError):
             installed = "?"
+        hooks_ok = installed == "yes"
 
         win = None
         if key == "claude":
             win = W._claude(getattr(args, "window_cache", None))
         elif key == "grok":
             win = W._grok()
-        # Codex is per-session: its reading lives in whichever rollout is
-        # current, so there is nothing account-wide to show here. Saying that
-        # is better than printing a blank that reads as "no budget known".
+
+        meter_ok = False
         if win is not None and win.is_stale:
-            meter = f"stale ({int(win.age)}s old)" if win.age else "stale"
+            age = f"{int(win.age)}s old" if win.age is not None else "undateable"
+            meter = f"stale ({age})"
         elif win is not None:
-            any_meter = True
+            meter_ok = True
             meter = f"{win.used_percent:.0f}% of {win.label()}"
             if win.resets_at:
                 meter += f", resets {_when(win.resets_at)}"
         elif key == "codex":
-            meter = "per-session (read from the current rollout)"
+            # Per-session: the reading lives in whichever rollout is current,
+            # so there is nothing account-wide to print. That is not a missing
+            # meter, and it used to be counted as one.
+            meter_ok = hooks_ok
+            meter = "per-session (from the current rollout)"
         elif key == "claude":
-            meter = "none -- run `dim statusline --install`"
+            # Distinguish "never recorded" from "recorded, window since
+            # reset". Telling somebody to install what they already installed
+            # is how a tool loses their trust in everything else it says.
+            statusline_on = _statusline_installed()
+            meter = ("recorded, but every window has reset -- it will refresh"
+                     if statusline_on else
+                     "none -- run `dim statusline --install`")
         else:
             meter = "none recorded"
-        rows.append((key, "yes" if detected.get(key) else "no",
-                     installed, meter))
+
+        if on_path:
+            ready.append((key, hooks_ok, meter_ok, installed, missing))
+        rows.append((key, "yes" if on_path else "no", installed, meter))
 
     print(f"{'agent':8} {'on PATH':8} {'hooks':8} meter")
     for key, path, installed, meter in rows:
         print(f"{key:8} {path:8} {installed:8} {meter}")
     print()
-    if not any_meter:
-        # An honest zero. This is the state where nothing seals before the
-        # wall, and it must not be reported as readiness.
-        print("no live meter, so nothing will seal before a window closes.",
+    if not ready:
+        print("no agent CLIs found, so there is nothing to seal for.",
               file=sys.stderr)
         return 1
-    return 0
+    if any(hooks_ok and meter_ok for _k, hooks_ok, meter_ok, _i, _m in ready):
+        return 0
+
+    # NOT READY, and it says which half is missing per agent. "no live meter"
+    # was printed even when the meter was live and the hooks were the problem,
+    # which sends the reader to fix the wrong thing.
+    print("nothing will seal before a window closes:", file=sys.stderr)
+    for key, hooks_ok, meter_ok, installed, missing in ready:
+        why = []
+        if not hooks_ok:
+            why.append(f"hooks {installed}"
+                       + (f" (missing {', '.join(missing)})" if missing
+                          and installed != "no" else ""))
+        if not meter_ok:
+            why.append("no live meter"
+                       + (" -- run `dim statusline --install`"
+                          if key == "claude" and not _statusline_installed()
+                          else ""))
+        print(f"  {key}: {'; '.join(why)}", file=sys.stderr)
+    return 1
 
 
 def main(argv=None):

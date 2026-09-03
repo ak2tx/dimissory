@@ -58,6 +58,13 @@ import time
 # account share it, and the freshest observation is the true one.
 DEFAULT_CACHE = "~/.dimissory/window/claude.json"
 
+# How long a wrapped statusline may take before we give up on it. Was 10s,
+# which is a very long time to stare at a frozen bar -- and Claude Code
+# cancels a statusline that is still running when the next update arrives, so
+# a slow wrap is wasted work as well as a visible stall. The recording happens
+# BEFORE the wrap, so a hang costs the bar and never the sample.
+WRAP_TIMEOUT = 3.0
+
 # Which windows we understand well enough to name in a letter. Anything else
 # in `rate_limits` is still recorded -- the shape is theirs to extend, and a
 # window we cannot label is not a window we should silently drop.
@@ -68,6 +75,53 @@ LABELS = {"five_hour": "claude 5h",
 
 def cache_path(root=None):
     return os.path.expanduser(root or DEFAULT_CACHE)
+
+
+def percentage(value):
+    """A usable percentage, or None. Rejects what `isinstance` lets through.
+
+    `isinstance(v, (int, float))` accepts `True`, `NaN` and `inf`, and every
+    one of those is a live defect in the number that decides when to seal:
+
+        True    bool subclasses int, so float(True) is 1.0
+        inf     `inf >= 85` is True -- an immediate seal, forever
+        NaN     every comparison is False, so it reads as "plenty of room"
+                while also defeating any ordering
+
+    Both R3 reviewers found this independently. The bound is generous at the
+    top because a spend limit is documented as able to exceed 100.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        pct = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if pct != pct or pct in (float("inf"), float("-inf")):
+        return None                       # NaN, +inf, -inf
+    if pct < 0.0 or pct > 1000.0:
+        return None                       # not a percentage anybody measured
+    return pct
+
+
+def reset_time(value):
+    """A plausible reset epoch, or None. Same reasoning as `percentage`.
+
+    A NaN reset defeats the expiry check specifically: `NaN <= now` is False,
+    so it never looks expired and the window it belongs to never retires.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        at = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if at != at or at in (float("inf"), float("-inf")):
+        return None
+    # Anything outside a couple of decades either side is not a reset time.
+    if not (946_684_800 < at < 4_102_444_800):
+        return None
+    return at
 
 
 def extract(payload):
@@ -84,15 +138,15 @@ def extract(payload):
     for key, value in limits.items():
         if not isinstance(value, dict):
             continue
-        pct = value.get("used_percentage")
-        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+        pct = percentage(value.get("used_percentage"))
+        if pct is None:
             continue                  # no percentage is not a percentage of 0
-        resets = value.get("resets_at")
+        if not isinstance(key, str) or not key or len(key) > 64:
+            continue                  # a key we cannot label is not a window
         out.append({"kind": key,
                     "label": LABELS.get(key, f"claude {key}"),
-                    "used_percent": float(pct),
-                    "resets_at": resets if isinstance(resets, (int, float))
-                    else None})
+                    "used_percent": pct,
+                    "resets_at": reset_time(value.get("resets_at"))})
     # Nearest full first, so a reader taking [0] gets the binding window --
     # the same rule the Codex path uses, for the same reason: the cap that is
     # closest to stopping you is the one that matters.
@@ -103,8 +157,20 @@ def extract(payload):
 def record(payload, root=None):
     """Write the windows down for the hook to read. Returns them, or [].
 
+    MERGED BY WINDOW KIND, not written as a whole list. Each window can be
+    absent on its own, and two sessions on one account do not always report
+    the same pair -- so replacing the file wholesale let one session erase
+    another's reading. Measured by review: session A records five_hour 95% and
+    seven_day 40%, session B reports only seven_day 41%, and the 95% cap that
+    was about to stop the work is simply gone.
+
+    Within one kind the rule is `_codex`'s rule, for the same reason: usage
+    inside a window cannot go down, so a lower reading for the SAME resets_at
+    is a stale or late-arriving sample and does not overwrite a higher one. A
+    changed resets_at is a real rollover and always wins.
+
     Never raises. A statusline that fails is a failure the user sees on every
-    turn, so a lost observation costs one sample and nothing else.
+    render, so a lost observation costs one sample and nothing else.
     """
     windows = extract(payload)
     if not windows:
@@ -114,15 +180,43 @@ def record(payload, root=None):
         # wrong. The staleness gate in window.py is what retires it.
         return []
     path = cache_path(root)
+    now = time.time()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        blob = {"observed_at": time.time(),
+        merged = {}
+        try:
+            with open(path, encoding="utf-8") as fh:
+                old = json.load(fh)
+            for w in (old.get("windows") or []):
+                if isinstance(w, dict) and w.get("kind"):
+                    merged[w["kind"]] = w
+        except (OSError, ValueError, AttributeError):
+            pass
+        for w in windows:
+            held = merged.get(w["kind"])
+            if held and held.get("resets_at") == w.get("resets_at") \
+                    and isinstance(held.get("used_percent"), (int, float)) \
+                    and held["used_percent"] > w["used_percent"]:
+                continue          # same window, lower number: a late sample
+            merged[w["kind"]] = dict(w, seen_at=now)
+        # Drop windows whose reset has passed rather than carrying them
+        # forever; Claude Code stops sending them, so nothing would.
+        live = [w for w in merged.values()
+                if not (isinstance(w.get("resets_at"), (int, float))
+                        and w["resets_at"] <= now)]
+        live.sort(key=lambda w: w["used_percent"], reverse=True)
+        blob = {"observed_at": now,
                 "source": "claude",
                 "session": (payload or {}).get("session_id"),
                 "version": (payload or {}).get("version"),
-                "windows": windows}
+                "windows": live}
         tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        # 0o600 like the letters and the journal. This file becomes OBSERVED
+        # in a document that says it was established by dimissory rather than
+        # by the agent, so it should not be readable by every account on the
+        # host just because the umask was loose.
+        fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(blob, fh)
         os.replace(tmp, path)          # atomic: a reader never sees a partial
     except OSError:
@@ -201,17 +295,35 @@ def main(argv=None, stdin=None):
     if wrap:
         # Somebody else's statusline. Theirs is what shows; we only listened.
         # Installing a tool must not cost a person the bar they already had.
+        #
+        # RUN THROUGH A SHELL, because that is how Claude Code runs
+        # `statusLine.command`. The first version used shlex.split with no
+        # shell, which silently changed the meaning of every command with a
+        # pipe, a redirect or an `&&` in it -- and the example in Claude
+        # Code's own statusline documentation is a `jq` pipeline. Measured by
+        # review: `echo hello && echo world` printed "hello && echo world".
+        #
+        # Passing an existing command back to the same interpreter that ran
+        # it before is not an added risk: it is already in the user's
+        # settings file and Claude Code already executes it this way.
         try:
-            import shlex
-            done = subprocess.run(shlex.split(wrap), input=raw,
-                                  capture_output=True, text=True, timeout=10)
-            sys.stdout.write(done.stdout)
-            return 0
+            done = subprocess.run(wrap, shell=True, input=raw,
+                                  capture_output=True, text=True,
+                                  timeout=WRAP_TIMEOUT)
         except (OSError, ValueError, subprocess.SubprocessError):
-            # Their command is broken. Say which, once, in the bar -- silence
-            # here would look like dimissory ate their statusline.
+            # Their command is broken or hung. Say which, once, in the bar --
+            # silence here would look like dimissory ate their statusline.
             sys.stdout.write("dimissory: wrapped statusline failed")
             return 0
+        sys.stdout.write(done.stdout)
+        if done.returncode != 0 and not done.stdout.strip():
+            # A non-zero exit that printed nothing used to vanish entirely,
+            # leaving an empty bar and no clue why. Their stderr is not echoed
+            # into the bar (it would corrupt the line), so the exit code is
+            # the only thing left to report.
+            sys.stdout.write(f"dimissory: wrapped statusline exited "
+                             f"{done.returncode}")
+        return 0
 
     try:
         sys.stdout.write(describe(payload, windows))

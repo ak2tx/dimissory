@@ -107,6 +107,26 @@ def seconds(value, default=None):
     return n * (unit or 1.0) if n >= 0 else default
 
 
+def write_at(cfg, default=0.85):
+    """The seal margin as a fraction. Never a bool, never `or`-defaulted.
+
+    Two bugs in one line, both found in review. `cfg.get(...) or 0.85` turned
+    a configured 0 -- "always seal" -- into 0.85. Replacing that with
+    `isinstance(v, (int, float))` then admitted TOML `true`/`false`, because
+    bool subclasses int, so `write_at = false` became 0.0 and ALSO meant
+    "always seal". The only honest reading of a non-number here is that the
+    setting was not usable.
+
+    Lives here rather than in the CLI so the hook and `dim status` cannot
+    disagree about where the margin is.
+    """
+    value = cfg.get("window", "write_at")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    value = float(value)
+    return value if 0.0 <= value <= 1.0 else default
+
+
 def _toml_str(value):
     """A TOML basic string that survives a Windows path.
 
