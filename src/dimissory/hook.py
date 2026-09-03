@@ -74,25 +74,61 @@ def normalise_event(raw):
     return "".join(str(raw or "").replace("-", "_").split("_")).lower()
 
 
+def _quote(part):
+    """Shell-safe on the platform that will actually run it.
+
+    `shlex.quote` wraps in POSIX single quotes, which cmd.exe does not
+    understand -- it would pass the quotes through as part of the path. The
+    Windows convention is double quotes, and only when they are needed.
+    """
+    if os.name == "nt":
+        return f'"{part}"' if (" " in part or "\t" in part) else part
+    import shlex
+    return shlex.quote(part)
+
+
 def dim_command():
-    """The exact invocation the agent should run, resolved absolutely.
+    """The exact invocation to run dimissory: absolute, and shell-safe.
 
-    Emitting a bare `dim` assumes it is on the AGENT's PATH, which is a
-    different PATH from the hook's and is frequently not. Measured: the hook
-    fired, injected its instruction, and the agent silently did nothing --
-    because `dim` was not resolvable for it. An instruction the reader cannot
-    execute is indistinguishable from no instruction at all.
+    Emitting a bare `dim` assumes it is on the reader's PATH, which is a
+    different PATH from ours and frequently does not contain it. Measured
+    twice, both silent:
 
-    Prefer a real `dim`/`dimissory` on PATH, since that survives the package
-    being upgraded. Fall back to running this interpreter against this module,
-    which is always correct even from a source checkout.
+      the agent   the hook fired, injected its instruction, and the agent did
+                  nothing, because `dim` was not resolvable for it. An
+                  instruction the reader cannot execute is indistinguishable
+                  from no instruction at all.
+      the host    a hook host runs its command through a shell whose PATH is
+                  its own. With dimissory in a venv or ~/.local/bin, `dim hook`
+                  exits 127 and the hook never fires -- and a hook that never
+                  fires looks exactly like a hook with nothing to say.
+
+    Resolution order matters. The console script belonging to THIS interpreter
+    wins over anything on PATH, because a venv or a source checkout can easily
+    find a DIFFERENT, older `dim` first and write that into a config that then
+    points at the wrong install for good.
     """
     import shutil
+    names = ("dim.exe", "dimissory.exe") if os.name == "nt" else ("dim", "dimissory")
+    bindir = os.path.dirname(os.path.abspath(sys.executable))
+    for name in names:
+        cand = os.path.join(bindir, name)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return _quote(cand)
     for name in ("dim", "dimissory"):
         found = shutil.which(name)
         if found:
-            return found
-    return f"{sys.executable} -m dimissory.cli"
+            return _quote(found)
+    # Always correct, even from a source checkout with nothing installed --
+    # and quoted, because the default Windows install lives under a path with
+    # a space in it ("C:\Program Files\..."), where an unquoted command line
+    # splits into a first word that is not an interpreter.
+    return f"{_quote(sys.executable)} -m dimissory.cli"
+
+
+def hook_command():
+    """What a hook host should be configured to run."""
+    return dim_command() + " hook"
 
 
 # WORDING IS PART OF THE MECHANISM, and this was measured the hard way.

@@ -58,7 +58,21 @@ TARGETS = {
     },
 }
 
-MARKER = "dim hook"          # how we recognise our own entry on a re-install
+# How we recognise our own entry on a re-install. This is a TUPLE because the
+# command is resolved per environment, and the forms it takes do not share one
+# substring: an absolute console script ends in `.../dim hook`, while a source
+# checkout with nothing installed gets `"<python>" -m dimissory.cli hook`. A
+# marker matching only the first form would fail to spot our own entry in the
+# second, and every re-install would append another copy of a hook that was
+# already there -- silently, since duplicates still fire.
+MARKERS = ("dim hook", "dimissory hook", "dimissory.cli hook")
+MARKER = MARKERS[0]                          # kept: callers and tests use it
+
+
+def is_ours(entry):
+    """Whether a hook entry is one we wrote, in any of its resolved forms."""
+    blob = json.dumps(entry)
+    return any(m in blob for m in MARKERS)
 
 
 class InstallRefused(Exception):
@@ -138,7 +152,7 @@ def plan(target, command, path=None):
             raise InstallRefused(
                 f"{p}: hooks.{event} is a {type(current).__name__}, not a "
                 f"list. Refusing to rewrite it.")
-        if any(MARKER in json.dumps(x) for x in current):
+        if any(is_ours(x) for x in current):
             continue                      # already ours; installing twice is a no-op
         current.extend(entries)
         added.append(event)
@@ -146,9 +160,17 @@ def plan(target, command, path=None):
     return existing, merged, added
 
 
-def install(target, command="dim hook", path=None, assume_yes=False,
+def install(target, command=None, path=None, assume_yes=False,
             out=print, ask=None):
-    """Install our hooks into one host. Returns (path, added) or (None, [])."""
+    """Install our hooks into one host. Returns (path, added) or (None, []).
+
+    `command` defaults to the ABSOLUTE invocation for this environment, not to
+    a bare `dim hook`. The host runs its hooks through a shell carrying its own
+    PATH; ours is not it.
+    """
+    if command is None:
+        from .hook import hook_command
+        command = hook_command()
     spec = TARGETS[target]
     p = os.path.expanduser(path or spec["path"])
     existing, merged, added = plan(target, command, p)

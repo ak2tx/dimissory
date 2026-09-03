@@ -312,7 +312,8 @@ def cmd_hook(args):
         return rc
     if args.print_config:
         t = args.target or "claude"
-        _e, merged, _a = I.plan(t, args.command, path=os.devnull)
+        _e, merged, _a = I.plan(t, args.command or H.hook_command(),
+                                path=os.devnull)
         print(json.dumps(merged, indent=2))
         return 0
     return H.main()
@@ -403,8 +404,9 @@ def main(argv=None):
     hk.add_argument("--install", action="store_true",
                     help="write hook config for every detected agent CLI")
     hk.add_argument("--target", help="claude | codex | grok (default: all found)")
-    hk.add_argument("--command", default="dim hook",
-                    help="the command the hook runs (default: dim hook)")
+    hk.add_argument("--command", default=None,
+                    help="the command the hook runs (default: this install's "
+                         "own dim, resolved to an absolute path)")
     hk.add_argument("--print", dest="print_config", action="store_true",
                     help="print the config that would be installed")
     hk.add_argument("--yes", action="store_true", help="do not ask")

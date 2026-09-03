@@ -1,14 +1,21 @@
 [build-system]
-requires = ["setuptools>=68"]
+# 77 is the floor for PEP 639 (`license` as an SPDX string). Build-time only --
+# it does not raise the floor for anyone INSTALLING the wheel.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "dimissory"
-version = "0.0.1"
+# Read from dimissory.__version__ rather than written twice. Two literals in
+# two files agree right up until one of them is bumped alone, and the one that
+# is easy to forget is the one `dim --version` prints -- so the tool would
+# report a version that was never released.
+dynamic = ["version"]
 description = "Don't lose the run when the window closes. Portable, verifiable handoff letters for agent CLIs."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Ak2tx LLC" }]
 keywords = ["agent", "handoff", "continuity", "quota", "rate-limit",
             "resume", "claude-code", "codex", "grok"]
@@ -16,7 +23,9 @@ classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  # No "License :: OSI Approved" classifier: PEP 639 deprecated it in favour
+  # of the SPDX `license` field above, and supplying both is an error on
+  # current setuptools.
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
@@ -34,5 +43,14 @@ Source = "https://github.com/ak2tx/Dimissory"
 dim = "dimissory.cli:main"
 dimissory = "dimissory.cli:main"
 
+[tool.setuptools.dynamic]
+version = { attr = "dimissory.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The package is annotated throughout; without this marker PEP 561 says a type
+# checker must ignore all of it, so every annotation here is dead weight to
+# anyone importing dimissory as a library.
+[tool.setuptools.package-data]
+dimissory = ["py.typed"]
