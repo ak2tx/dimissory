@@ -246,20 +246,66 @@ def test_an_old_reading_is_not_evidence_of_headroom():
     check("even a very old one", W.should_seal(w(90, 3500), 0.85) is True)
 
 
-def test_growth_that_cannot_be_bounded_answers_i_do_not_know():
-    """No window length means no arithmetic. A recent reading is still taken
-    at face value; an older one must not be reported as headroom, so it
-    answers None and routes to the at-the-wall check."""
+def test_a_window_with_no_known_length_assumes_the_shortest_one():
+    """Answering "I do not know" here was itself a bug.
+
+    An unboundable reading used to return None past FRESH_FOR, and None routes
+    to the at-the-wall check -- which only reads Claude's tombstone. So GROK
+    could not seal at 84% at any age: the original "an hour of 84% is plenty
+    of room", wearing a third hat.
+
+    Assuming the SHORTEST real window is the conservative direction, because a
+    short window implies the fastest burn and therefore the highest ceiling.
+    The error is bounded: MAX_AGE refuses anything over an hour, so the
+    assumption can add at most 20 points.
+    """
     now = time.time()
     fresh = W.Window(50.0, None, source="grok", observed_at=now - 5)
-    check("no length is bounded", fresh.worst_case_percent is None)
-    check("but a recent reading is usable",
+    check("a span is assumed rather than refused",
+          fresh.worst_case_percent is not None, fresh.worst_case_percent)
+    check("and it is flagged as an assumption", fresh.span_is_assumed)
+    check("a recent under-margin reading is still False",
           W.should_seal(fresh, 0.85) is False)
-    old = W.Window(50.0, None, source="grok", observed_at=now - 3000)
-    check("an older unboundable reading answers None, not False",
-          W.should_seal(old, 0.85) is None)
+
+    old = W.Window(84.0, None, source="grok", observed_at=now - 3000)
+    check("an hour-old grok 84% now SEALS", W.should_seal(old, 0.85) is True,
+          old.worst_case_percent)
+    low = W.Window(20.0, None, source="grok", observed_at=now - 3000)
+    check("but an hour-old 20% still does not",
+          W.should_seal(low, 0.85) is False, low.worst_case_percent)
     across = W.Window(95.0, None, source="grok", observed_at=now - 3000)
-    check("unless it was already across", W.should_seal(across, 0.85) is True)
+    check("and one already across seals", W.should_seal(across, 0.85) is True)
+
+    # A window whose length IS known does not get the assumption.
+    known = W.Window(50.0, 10080, source="codex", observed_at=now)
+    check("a real length is used, not the assumption",
+          not known.span_is_assumed and known.window_seconds == 10080 * 60.0,
+          known.window_seconds)
+    spend = W.Window(50.0, None, source="claude", observed_at=now)
+    spend.fixed_label = "claude spend"
+    check("and claude spend has a documented one",
+          not spend.span_is_assumed, spend.window_seconds)
+
+
+def test_the_letter_reports_the_latest_reading_and_the_peak_decides():
+    """The monotonic rule made the Observed field lie.
+
+    Taking the max within a window correctly rejects Codex's 0.0 placeholder,
+    but it also discarded a GENUINE drop -- an overage grant, a plan upgrade,
+    a credit top-up -- forever, so a letter reported "90% used" when the truth
+    was 40%. A conservative DECISION is fine; a document that misstates a
+    measurement is not.
+    """
+    now = time.time()
+    w = W.Window(40.0, 300, source="codex", observed_at=now,
+                 peak_percent=90.0, peak_at=now - 600)
+    check("the letter reports what was last measured",
+          w.as_dict()["used_percent"] == 40.0, w.as_dict())
+    check("the decision uses the peak", W.should_seal(w, 0.85) is True)
+    check("and growth is measured from when the PEAK was seen, not the latest",
+          w.worst_case_percent > 90.0, w.worst_case_percent)
+    check("while freshness comes from the latest contact",
+          w.age < 5, w.age)
 
     # Claude names its windows rather than giving a length, so the length is
     # looked up -- otherwise the whole Claude path would be unboundable.
@@ -519,7 +565,8 @@ def main():
               test_the_binding_window_is_whichever_is_nearest_full,
               test_a_placeholder_zero_does_not_erase_a_real_reading,
               test_an_old_reading_is_not_evidence_of_headroom,
-              test_growth_that_cannot_be_bounded_answers_i_do_not_know,
+              test_a_window_with_no_known_length_assumes_the_shortest_one,
+              test_the_letter_reports_the_latest_reading_and_the_peak_decides,
               test_the_bound_is_used_for_the_decision_and_never_reported,
               test_the_window_name_and_the_other_caps_reach_the_letter,
               test_a_reading_stamped_in_the_future_is_refused,

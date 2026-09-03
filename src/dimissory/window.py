@@ -95,7 +95,24 @@ FRESH_FOR = 120.0
 # length is looked up rather than derived. These are the documented spans, and
 # they are needed for the growth bound below -- without a length there is no
 # arithmetic, only a guess.
-CLAUDE_WINDOW_MINUTES = {"claude 5h": 300, "claude 7d": 10080}
+CLAUDE_WINDOW_MINUTES = {"claude 5h": 300, "claude 7d": 10080,
+                         "claude spend": 43200}          # a 30-day period
+
+# When no length is knowable at all -- Grok's account-wide credit figure, or a
+# window Anthropic adds under a name we do not recognise -- the SHORTEST real
+# window is assumed rather than giving up.
+#
+# Giving up was the bug: `worst_case_percent` returned None, `should_seal`
+# answered None for anything past FRESH_FOR, and None routes to the
+# at-the-wall check, which only reads Claude's tombstone. So Grok could not
+# seal at 84% at ANY age -- the original "an hour of 84% is plenty of room",
+# wearing a third hat.
+#
+# Assuming the SHORTEST window is the conservative direction, because a short
+# window implies the fastest burn rate and therefore the highest ceiling. And
+# the error is bounded: MAX_AGE refuses anything over an hour, so the most
+# this assumption can ever add is 20 points.
+ASSUMED_SPAN_MINUTES = 300
 
 
 def percentage(value):
@@ -159,11 +176,37 @@ class Window:
     """
 
     __slots__ = ("used_percent", "window_minutes", "resets_at", "source",
-                 "observed_at", "plan", "also", "fixed_label")
+                 "observed_at", "plan", "also", "fixed_label", "peak_percent",
+                 "peak_at")
 
     def __init__(self, used_percent, window_minutes=None, resets_at=None,
-                 source="", observed_at=None, plan=None):
+                 source="", observed_at=None, plan=None, peak_percent=None,
+                 peak_at=None):
         self.used_percent = float(used_percent)
+        # THE HIGHEST FIGURE SEEN IN THIS WINDOW, which is not always the
+        # latest one. `used_percent` is what a letter reports, because that is
+        # what was last measured; `peak_percent` is what the SEAL decision
+        # uses, because usage normally only grows and the peak is therefore a
+        # lower bound on where the account actually is.
+        #
+        # Keeping them apart is the fix for a real defect: the monotonic rule
+        # (max wins within a window) correctly rejects Codex's 0.0 placeholder,
+        # but it also discarded a GENUINE drop -- an overage grant, a plan
+        # upgrade, a credit top-up -- forever. So a letter would report "90%
+        # used" when the truth was 40%. A conservative decision is fine; a
+        # document that misstates a measurement is not.
+        self.peak_percent = (float(peak_percent)
+                             if isinstance(peak_percent, (int, float))
+                             and not isinstance(peak_percent, bool)
+                             else self.used_percent)
+        # WHEN the peak was seen, which is not always when we last heard
+        # anything. Growth has to be measured from the moment usage was known
+        # to be at the peak; measuring it from a newer, lower reading would
+        # understate the ceiling, which is the one direction that matters.
+        # `observed_at` stays the latest contact, so freshness is judged on
+        # when we last learned ANYTHING.
+        self.peak_at = peak_at if isinstance(peak_at, (int, float)) \
+            else observed_at
         self.window_minutes = window_minutes
         self.resets_at = resets_at
         self.source = source
@@ -189,15 +232,26 @@ class Window:
         return a > MAX_AGE or a < -MAX_SKEW
 
     @property
+    def span_is_assumed(self):
+        """True when no real length was known and the shortest was assumed."""
+        return not (self.window_minutes
+                    or CLAUDE_WINDOW_MINUTES.get(self.fixed_label or ""))
+
+    @property
     def window_seconds(self):
-        """How long this window spans, or None when that is not knowable."""
-        minutes = self.window_minutes
-        if not minutes:
-            minutes = CLAUDE_WINDOW_MINUTES.get(self.fixed_label or "")
+        """How long this window spans. Never None -- see ASSUMED_SPAN_MINUTES.
+
+        Returning None here meant `should_seal` answered None for every
+        unboundable reading past FRESH_FOR, which made Grok unsealable at any
+        percentage under the margin.
+        """
+        minutes = (self.window_minutes
+                   or CLAUDE_WINDOW_MINUTES.get(self.fixed_label or "")
+                   or ASSUMED_SPAN_MINUTES)
         try:
-            return float(minutes) * 60.0 if minutes else None
+            return float(minutes) * 60.0
         except (TypeError, ValueError):
-            return None
+            return float(ASSUMED_SPAN_MINUTES) * 60.0
 
     @property
     def worst_case_percent(self):
@@ -226,10 +280,15 @@ class Window:
         may not.
         """
         span = self.window_seconds
-        age = self.age
-        if span is None or age is None or age < 0:
+        base_at = self.peak_at if self.peak_at is not None else self.observed_at
+        if span is None or base_at is None:
             return None
-        return self.used_percent + (age / span) * 100.0
+        age = time.time() - base_at
+        if age < 0:
+            return None
+        # From the PEAK and from WHEN the peak was seen: the peak is our lower
+        # bound on where usage actually is, and growth accrues on top of it.
+        return max(self.used_percent, self.peak_percent) + (age / span) * 100.0
 
     def label(self):
         if self.fixed_label:
@@ -296,7 +355,8 @@ def _codex(transcript):
         return None
     # Grouped by window identity, because a percentage is only comparable
     # against others measured in the SAME window.
-    groups: dict = {}
+    groups: dict = {}          # window identity -> the HIGHEST reading seen
+    latest_seen: dict = {}     # window identity -> the LAST reading seen
     plan = None
     try:
         with open(transcript, "rb") as fh:
@@ -337,6 +397,23 @@ def _codex(transcript):
                         continue
                     key = (slot, part.get("resets_at"))
                     prev = groups.get(key)
+                    # The LATEST reading in this window -- what a letter
+                    # reports, so a genuine drop (an overage grant, a plan
+                    # upgrade) stops being invisible.
+                    #
+                    # Except an exact 0.0 following a real figure, which is
+                    # Codex's documented placeholder rather than a
+                    # measurement: 16 of 300 real rollouts end on one. Letting
+                    # it through would print "0% used" in a document whose
+                    # first rule is that a number nobody measured is omitted,
+                    # never zero. A wholly zero rollout is refused separately.
+                    latest = latest_seen.get(key)
+                    placeholder = (pct == 0.0 and latest is not None
+                                   and latest[0] > 0.0)
+                    newer = (latest is None or latest[1] is None or at is None
+                             or at >= latest[1])
+                    if newer and not placeholder:
+                        latest_seen[key] = (pct, at)
                     if prev is None or pct > prev[0]:
                         # THE TIMESTAMP OF THE WINNING READING, not the newest
                         # one in the file. `latest_at = max(timestamp)` took
@@ -389,11 +466,20 @@ def _codex(transcript):
         # account, and `ranked` puts the non-zero one first, so that reading
         # survives and keeps its real 0% in `also`.
         return None
-    pct, minutes, resets, seen = ranked[0]
-    win = Window(pct, minutes, resets, source="codex", observed_at=seen,
-                 plan=plan)
-    win.also = [Window(p, m, r, source="codex", observed_at=a, plan=plan)
-                for p, m, r, a in ranked[1:]]
+    # `groups` is keyed by (slot, resets_at) and so is `latest_seen`, so each
+    # winning entry is matched back to the latest reading of the SAME window.
+    by_entry = {id(v): k for k, v in groups.items()}
+
+    def build(entry):
+        peak, minutes, resets, peak_at = entry
+        latest, latest_at = latest_seen.get(by_entry.get(id(entry)),
+                                            (peak, peak_at))
+        return Window(latest, minutes, resets, source="codex",
+                      observed_at=latest_at if latest_at is not None else peak_at,
+                      plan=plan, peak_percent=peak, peak_at=peak_at)
+
+    win = build(ranked[0])
+    win.also = [build(e) for e in ranked[1:]]
     return win
 
 
@@ -691,7 +777,7 @@ def should_seal(window, at=0.85):
     if window is None:
         return None
     margin = at * 100.0
-    if window.used_percent >= margin:
+    if max(window.used_percent, window.peak_percent) >= margin:
         return True
     ceiling = window.worst_case_percent
     if ceiling is None:
