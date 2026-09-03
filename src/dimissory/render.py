@@ -74,8 +74,18 @@ def _lines(observed) -> list:
         calls = k["calls"]
         out.append(f"calls       {len(calls)} observed in the transcript tail")
     if "window_used_percent" in k:
+        # A human-readable reset time. The raw epoch was correct and useless:
+        # a letter is read by a person deciding whether to keep working, and
+        # "resets 1788410545" answers nothing they asked.
         resets = k.get("window_resets_at")
-        tail = f", resets {resets}" if resets else ""
+        tail = ""
+        if resets:
+            try:
+                import time as _t
+                when = _t.localtime(float(resets))
+                tail = f", resets {_t.strftime('%a %H:%M', when)}"
+            except (TypeError, ValueError, OSError):
+                tail = ""            # unparseable: omit, never print a guess
         out.append(f"window      {k['window_used_percent']:.0f}% used{tail}")
     return out
 

@@ -170,6 +170,29 @@ def _handle(payload, journal_root, letters_dir):
         return json.dumps({"decision": "block",
                            "reason": GATE.format(sid=sid, dim=dim_command())})
 
+    # THE TRIGGER. A tool call is the only regular heartbeat a hook gets, so
+    # this is where the window is checked. Sealing here means the letter is
+    # written while the agent still has budget -- which is the entire claim,
+    # and the difference from every tool that reacts to a 429.
+    if event in ("posttooluse", "posttoolusefailure"):
+        from . import window as _W
+        from .config import Config
+        cfg = Config.load(None)
+        win = _W.read(transcript=field(payload, "transcript"))
+        due = _W.should_seal(win, float(cfg.get("window", "write_at") or 0.85))
+        if due:
+            path = seal(sid, payload, journal_root, letters_dir)
+            if path:
+                return json.dumps({"hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext":
+                        f"dimissory: {win.used_percent:.0f}% of your "
+                        f"{win.label()} window is gone, so a handoff letter was "
+                        f"sealed at {path}. If your next action has changed, "
+                        f"record it now with `dim declare --session {sid} "
+                        f"--next \"...\"` -- there may not be a later chance."}})
+        return ""
+
     if event in ("precompact", "sessionend"):
         path = seal(sid, payload, journal_root, letters_dir)
         if path:
@@ -192,8 +215,15 @@ def seal(sid, payload, journal_root=None, letters_dir=None):
     jroot = os.path.expanduser(journal_root or "~/.dimissory/journal")
     ours = (letters, jroot)
 
+    # The meter. This is what makes a letter possible BEFORE the wall rather
+    # than after a 429, and it costs one read of the transcript the hook
+    # already handed us. Absent or stale reads as None, and the renderer omits
+    # the line rather than inventing a percentage.
+    from . import window as _W
+    win = _W.read(transcript=field(payload, "transcript"))
     observed = observe(cwd=cwd, transcript=field(payload, "transcript"),
-                       our_dirs=ours)
+                       our_dirs=ours,
+                       window=win.as_dict() if win else None)
     declared, ages, _damaged = journal.to_declared(sid, root=journal_root)
     # The expectation must be the command's REAL OUTPUT. Without this the check
     # fell back to a derived list of paths, which does not look like

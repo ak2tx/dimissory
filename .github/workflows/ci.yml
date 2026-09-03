@@ -28,6 +28,8 @@ jobs:
         run: python tests/test_journal.py
       - name: the hook and its installer
         run: python tests/test_hook.py
+      - name: the plan-window meter
+        run: python tests/test_window.py
 
   package:
     runs-on: ubuntu-latest
