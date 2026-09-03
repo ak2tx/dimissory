@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -263,6 +264,50 @@ def cmd_declare(args):
     return 0
 
 
+def cmd_hook(args):
+    """`dim hook` -- the hook handler, and its installer."""
+    from . import hook as H
+    from . import install as I
+    if args.install:
+        detected = I.detect()
+        have = [k for k, v in detected.items() if v]
+        if not args.target and not have:
+            print("no agent CLIs found on PATH (claude, codex, grok). "
+                  "Install one, or pass --target to force.", file=sys.stderr)
+            return 1
+        targets = [args.target] if args.target else have
+        rc, done = 0, []
+        for t in targets:
+            if t not in I.TARGETS:
+                print(f"unknown target {t!r}; expected one of "
+                      f"{', '.join(I.TARGETS)}", file=sys.stderr)
+                return 1
+            try:
+                path, added = I.install(t, command=args.command,
+                                        assume_yes=args.yes)
+            except I.InstallRefused as e:
+                print(f"  {I.TARGETS[t]['label']}: {e}", file=sys.stderr)
+                rc = 1
+                continue
+            if path and added:
+                done.append(t)
+        if done:
+            print(f"\ninstalled for: {', '.join(done)}")
+            print("restart the agent for it to read the new configuration")
+        elif rc == 0:
+            # Declining is not success, and neither is a run that changed
+            # nothing while printing nothing.
+            print("nothing was installed", file=sys.stderr)
+            rc = 1
+        return rc
+    if args.print_config:
+        t = args.target or "claude"
+        _e, merged, _a = I.plan(t, args.command, path=os.devnull)
+        print(json.dumps(merged, indent=2))
+        return 0
+    return H.main()
+
+
 def cmd_setup(args):
     from .setup import run
     return run(config_path=args.config, assume_yes=True if args.yes else None)
@@ -343,6 +388,17 @@ def main(argv=None):
     dc.add_argument("--revoke", action="append",
                     help="retract an earlier entry, verbatim")
     dc.set_defaults(fn=cmd_declare)
+
+    hk = sub.add_parser("hook", help="the agent hook, and its installer")
+    hk.add_argument("--install", action="store_true",
+                    help="write hook config for every detected agent CLI")
+    hk.add_argument("--target", help="claude | codex | grok (default: all found)")
+    hk.add_argument("--command", default="dim hook",
+                    help="the command the hook runs (default: dim hook)")
+    hk.add_argument("--print", dest="print_config", action="store_true",
+                    help="print the config that would be installed")
+    hk.add_argument("--yes", action="store_true", help="do not ask")
+    hk.set_defaults(fn=cmd_hook)
 
     su = sub.add_parser("setup", help="guided first-time setup")
     su.add_argument("--yes", action="store_true", help="take every default")
