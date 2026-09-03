@@ -298,7 +298,7 @@ def cmd_declare(args):
                       f"  {e.strerror or e}\n"
                       f"  Inside a sandbox $HOME is often read-only. Retry "
                       f"with a path you can write:\n"
-                      f"    dim declare --journal ./.dimissory/journal "
+                      f"    dim --journal ./.dimissory/journal declare "
                       f"--session {session} ...\n"
                       f"  or set DIMISSORY_HOME to a writable directory.",
                       file=sys.stderr)

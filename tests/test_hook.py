@@ -104,6 +104,50 @@ def test_the_ask_names_a_command_the_agent_can_actually_run():
           body.strip().startswith("IMPORTANT"), body[:60])
 
 
+def test_the_command_the_ask_emits_actually_runs():
+    """An instruction the reader cannot execute is no instruction at all --
+    and this file already says so about `dim_command()`. The same failure
+    then walked in through the TEXT beside it.
+
+    `--journal` is a TOP-LEVEL flag, so `dim declare --journal X` is rejected
+    by argparse with exit 64. The ask emitted exactly that, which would have
+    handed every agent on every host a command that could not run. Caught by
+    running it rather than reading it.
+    """
+    import subprocess
+    root = _root()
+    out = H.handle({"hook_event_name": "SessionStart", "session_id": "runme"},
+                   journal_root=root)
+    ask = _json(out)["hookSpecificOutput"]["additionalContext"]
+    line = [l for l in ask.splitlines() if "declare" in l]
+    check("the ask contains a declare command", bool(line), ask[:80])
+    cmd = line[0].strip()
+    check("and names the journal the hook will read", root in cmd, cmd[:120])
+
+    # RUN IT, with the placeholders filled the way an agent would fill them.
+    real = (cmd.replace("<one line: what this session is for>", "a real task")
+               .replace("<one line: the exact next action>", "a real next"))
+    real = real.replace(cmd.split()[0],
+                        f"{sys.executable} -m dimissory.cli", 1)
+    p = subprocess.run(["/bin/sh", "-c", real], capture_output=True, text=True,
+                       env={**os.environ,
+                            "PYTHONPATH": os.path.join(ROOT, "src")})
+    check("the emitted command exits 0", p.returncode == 0,
+          f"rc={p.returncode} {(p.stderr or '')[:100]}")
+    values, _a, _d = J.read("runme", root)
+    check("and it actually recorded the declaration",
+          values.get("task") == "a real task", values)
+
+    # The negative control: the ordering that was shipped must genuinely fail.
+    broken = real.replace("--journal", "XX", 1).replace("declare", "declare --journal", 1)
+    b = subprocess.run(["/bin/sh", "-c", broken.replace("XX", "", 1)],
+                       capture_output=True, text=True,
+                       env={**os.environ,
+                            "PYTHONPATH": os.path.join(ROOT, "src")})
+    check("while --journal AFTER the subcommand is rejected",
+          b.returncode == 64, f"rc={b.returncode}")
+
+
 def test_the_gate_blocks_only_when_nothing_was_declared():
     root = _root()
     stop = {"hookEventName": "Stop", "sessionId": "g1", "cwd": "/w"}
@@ -442,6 +486,7 @@ def main():
     print("=" * 66)
     for t in (test_both_payload_conventions_are_understood,
               test_the_ask_names_a_command_the_agent_can_actually_run,
+              test_the_command_the_ask_emits_actually_runs,
               test_the_gate_blocks_only_when_nothing_was_declared,
               test_the_gate_never_traps_the_agent_in_a_loop,
               test_a_session_that_is_already_declaring_is_not_nagged,

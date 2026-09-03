@@ -205,7 +205,7 @@ def command_works(command=None, timeout=20):
 # cannot dilute the instruction.
 ASK = (
     "IMPORTANT: before you finish, you MUST run this command:\n"
-    "  {dim} declare --journal {jroot} --session {sid} --task \"<one line: "
+    "  {dim} --journal {jroot} declare --session {sid} --task \"<one line: "
     "what this session is for>\" --next \"<one line: the exact next "
     "action>\"\n"
     "It records a handoff so work survives this session's plan window closing. "
@@ -218,7 +218,7 @@ GATE = (
     "This session has recorded nothing for its handoff letter, so if the "
     "window closes now the letter will be empty of everything that matters. "
     "Before finishing, run:\n"
-    "  {dim} declare --journal {jroot} --session {sid} --task \"<what this "
+    "  {dim} --journal {jroot} declare --session {sid} --task \"<what this "
     "session was for>\" --next \"<the exact next action for whoever "
     "continues>\"\n"
     "Then finish normally."
