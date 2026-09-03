@@ -57,9 +57,16 @@ from .observe import checks_for, observe
 from .render import render
 
 # The payload key conventions differ. Claude Code and Codex use snake_case;
-# Grok uses camelCase and supplies no transcript path at all. Reading only one
-# convention would silently produce a hook that fires and learns nothing --
-# which is this project's recurring defect wearing a new hat.
+# Grok sends BOTH camelCase and snake_case. Reading only one convention would
+# silently produce a hook that fires and learns nothing -- this project's
+# recurring defect wearing a new hat.
+#
+# "Grok supplies no transcript path" was true of 1.0.5 and is now wrong: Grok
+# ran its own CLI against this tool and dumped ten real payloads. 1.0.13 sends
+# `transcriptPath` AND `transcript_path` on UserPromptSubmit, Stop and
+# SessionEnd -- though still not on SessionStart. Both conventions on the same
+# object, which is exactly why `field` reads a tuple of aliases rather than a
+# key.
 _ALIASES = {
     "event": ("hook_event_name", "hookEventName"),
     "session": ("session_id", "sessionId"),

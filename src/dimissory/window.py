@@ -296,6 +296,12 @@ class Window:
         m = self.window_minutes
         if not m:
             return self.source
+        # int() first: a span derived from real period bounds arrives as a
+        # float, and "grok 1.0w" is a typo the arithmetic wrote for you.
+        try:
+            m = int(round(float(m)))
+        except (TypeError, ValueError):
+            return self.source
         if m % 10080 == 0:
             span = f"{m // 10080}w"
         elif m % 1440 == 0:
@@ -488,12 +494,38 @@ def _grok(root=None):
 
     Account-wide rather than per-host, which is the point: an agent running
     somewhere else is invisible to local session files and fully counted here.
+
+    THE WINDOW IS ON THE SAME LINE and this used to throw it away. The billing
+    record carries `currentPeriod.start`/`.end` -- a WEEKLY period on the
+    account measured -- and dropping it left `window_minutes` None, which made
+    the growth bound assume the shortest window instead. Grok ran that number
+    against itself and reported the result: a 56-hour-old 35% reading produced
+    a worst case of about 1154%, so a direct `should_seal(_grok())` said seal
+    on a reading that was nearly three days stale.
+
+    AND A WARNING THAT COST NOTHING TO LEARN AND WOULD HAVE COST A LOT TO
+    MISS. Grok 1.0.13 has a statusline whose payload is Claude-shaped, right
+    down to a `used_percentage` field. It is the CONTEXT window, not the plan:
+    measured at 3% while the weekly plan sat at 80%. Pointing `dim statusline`
+    at Grok would seal on the wrong number entirely.
+
+    What this cannot do is REFRESH the row. Measured on a real box: `grok -p`
+    never writes billing, no matter how much work it does -- only interactive
+    pager startup on a TTY does. So the file can sit for days while the
+    account drains, which is why the staleness gate matters more here than
+    anywhere else. It said 35%; the account was at 80%.
     """
     path = os.path.join(os.path.expanduser(root or "~/.grok"),
                         "logs", "unified.jsonl")
     latest = None
     try:
+        size = os.path.getsize(path)
         with open(path, "rb") as fh:
+            # A tail, not the whole file. Measured at 4.3 MB on a live box,
+            # with the interesting line 164 fetches from the end.
+            if size > _TAIL:
+                fh.seek(size - _TAIL)
+                fh.readline()
             for raw in fh:
                 if b"creditUsagePercent" in raw:
                     latest = raw
@@ -506,27 +538,37 @@ def _grok(root=None):
     except ValueError:
         return None
 
-    def dig(o):
+    def dig(o, key):
         if isinstance(o, dict):
-            for k, v in o.items():
-                if k == "creditUsagePercent":
-                    got = percentage(v)
-                    if got is not None:
-                        return got
-                got = dig(v)
+            if key in o:
+                return o[key]
+            for v in o.values():
+                got = dig(v, key)
                 if got is not None:
                     return got
         elif isinstance(o, list):
             for v in o:
-                got = dig(v)
+                got = dig(v, key)
                 if got is not None:
                     return got
         return None
 
-    pct = dig(d)
+    pct = percentage(dig(d, "creditUsagePercent"))
     if pct is None:
         return None
-    return Window(pct, source="grok", observed_at=_epoch(d.get("ts")))
+
+    # The period the percentage is a fraction OF. Without it the bound has no
+    # denominator and falls back to assuming five hours, which is wrong by a
+    # factor of 34 for a weekly window.
+    minutes = resets = None
+    period = dig(d, "currentPeriod")
+    if isinstance(period, dict):
+        start, end = _epoch(period.get("start")), _epoch(period.get("end"))
+        resets = end
+        if start is not None and end is not None and end > start:
+            minutes = (end - start) / 60.0
+    return Window(pct, minutes, resets, source="grok",
+                  observed_at=_epoch(d.get("ts")))
 
 
 def _claude(cache_root=None):

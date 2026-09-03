@@ -118,17 +118,39 @@ class InstallRefused(Exception):
     """The file was not in a state we are willing to rewrite."""
 
 
+# Where these CLIs live when they are NOT on PATH. Grok's own installer puts
+# it in ~/.grok/bin, and a box that runs Grok all day can still fail
+# `which grok` -- measured. `dim status` then printed `grok  no` and setup
+# never offered to install its hooks, on the machine Grok was running on.
+# Detecting only what is on PATH is detecting the operator's shell, not the
+# agent.
+EXTRA_PLACES = {
+    "grok": ("~/.grok/bin/grok", "~/.grok/downloads/grok-linux-x86_64"),
+    "claude": ("~/.local/bin/claude", "~/.claude/local/claude"),
+    "codex": ("~/.npm-global/bin/codex", "~/.local/bin/codex"),
+}
+
+
 def detect():
-    """Which agent CLIs are actually on PATH, keyed as TARGETS is keyed.
+    """Where each agent CLI actually is, keyed as TARGETS is keyed.
 
     Keyed identically on purpose. The predecessor's setup detected into a dict
     keyed by CLI name and then asked `if "anthropic" in found`, which was never
     true, so the one step that mattered silently never ran while setup reported
     success every time.
     """
-    return {k: next((shutil.which(c) for c in v["detect"] if shutil.which(c)),
-                    None)
-            for k, v in TARGETS.items()}
+    found = {}
+    for key, spec in TARGETS.items():
+        hit = next((shutil.which(c) for c in spec["detect"] if shutil.which(c)),
+                   None)
+        if hit is None:
+            for candidate in EXTRA_PLACES.get(key, ()):
+                p = os.path.expanduser(candidate)
+                if os.path.isfile(p) and os.access(p, os.X_OK):
+                    hit = p
+                    break
+        found[key] = hit
+    return found
 
 
 def _fingerprint(path):

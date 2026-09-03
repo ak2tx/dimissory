@@ -5,4 +5,4 @@ he can continue under a new authority without being examined again. This does
 the same for an agent session.
 """
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
