@@ -62,6 +62,18 @@ import time
 # five-hour window cannot have turned over inside it.
 MAX_AGE = 3600.0
 
+# How much of a rollout's tail is scanned for a reading.
+_TAIL = 2_000_000
+
+# A reading stamped in the future is a clock the reader cannot trust. A little
+# slack absorbs ordinary skew between a container and its host; beyond that the
+# reading is refused rather than treated as fresh, because `is_stale` used to
+# ask only `age > MAX_AGE` and a negative age sailed through it. A stamp two
+# hours ahead therefore looked newer than one taken now -- the failure pointing
+# the wrong way, since the whole job of the staleness gate is to refuse
+# readings it cannot vouch for.
+MAX_SKEW = 120.0
+
 
 class Window:
     """One plan window, and how it was learned.
@@ -72,7 +84,7 @@ class Window:
     """
 
     __slots__ = ("used_percent", "window_minutes", "resets_at", "source",
-                 "observed_at", "plan")
+                 "observed_at", "plan", "also")
 
     def __init__(self, used_percent, window_minutes=None, resets_at=None,
                  source="", observed_at=None, plan=None):
@@ -82,6 +94,7 @@ class Window:
         self.source = source
         self.observed_at = observed_at
         self.plan = plan
+        self.also = []          # the other windows on the same account
 
     @property
     def age(self):
@@ -90,7 +103,12 @@ class Window:
     @property
     def is_stale(self):
         a = self.age
-        return a is None or a > MAX_AGE
+        if a is None:
+            return True
+        # Both directions. `a > MAX_AGE` alone let a future stamp through as
+        # fresh, which is the one direction that matters: it makes an old
+        # reading look current to the code that decides when to seal.
+        return a > MAX_AGE or a < -MAX_SKEW
 
     def label(self):
         m = self.window_minutes
@@ -107,9 +125,18 @@ class Window:
         return f"{self.source} {span}"
 
     def as_dict(self):
-        return {"used_percent": self.used_percent,
-                "resets_at": self.resets_at,
-                "window": self.label()}
+        # `source` is carried, not dropped. Without it a reader cannot tell
+        # whose meter they are looking at, and `read` can legitimately answer
+        # from a different provider than the session they are in.
+        out = {"used_percent": self.used_percent,
+               "resets_at": self.resets_at,
+               "window": self.label(),
+               "source": self.source}
+        if self.also:
+            out["also"] = [{"used_percent": w.used_percent,
+                            "window": w.label(),
+                            "resets_at": w.resets_at} for w in self.also]
+        return out
 
     def __repr__(self):
         return (f"Window({self.used_percent:.0f}% {self.label()}, "
@@ -117,19 +144,49 @@ class Window:
 
 
 def _codex(transcript):
-    """The newest rate_limits object in a Codex rollout.
+    """The BINDING window in a Codex rollout: whichever is closest to full.
 
-    Newest wins: a session emits these repeatedly and the last one is the
-    current state. Read backwards so a long rollout costs a tail, not a scan.
+    Two corrections here, both from review round 1 and both confirmed against
+    332 real rollouts on a live account.
+
+    NEWEST IS NOT ALWAYS CREDIBLE. Codex emits `used_percent: 0.0` before it
+    has a real figure. 16 of 300 rollouts with any reading end on 0.0. Taking
+    the newest reading meant reporting a number nobody measured as a
+    confident 0% -- and 0% tells `should_seal` there is a whole window left.
+    That is exactly what UNMEASURED exists to prevent, and it slipped past it
+    because `Window.__init__` calls `float()` on whatever it is handed.
+
+    The rule that fixes it without special-casing zero: WITHIN ONE WINDOW,
+    USAGE CANNOT GO DOWN. Readings are grouped by `resets_at` -- the window's
+    identity -- and the maximum within the current group wins. A genuine
+    window rollover changes `resets_at`, so a real drop to 0% is still
+    honoured; a placeholder inside an unchanged window is not.
+
+    BOTH WINDOWS COUNT. Only `primary` (5h) was read. 36 of those rollouts
+    have `secondary` (the weekly cap) more than 20 points above primary --
+    including primary 0% against secondary 48%. The weekly window is
+    routinely the binding one, and a meter watching the wrong window reports
+    room that does not exist. Whichever is nearer full is returned; the other
+    rides along in `also` for the letter.
     """
     if not transcript or not os.path.exists(transcript):
         return None
-    best = None
+    # Grouped by window identity, because a percentage is only comparable
+    # against others measured in the SAME window.
+    groups: dict = {}
+    latest_at = None
+    plan = None
     try:
         with open(transcript, "rb") as fh:
             size = os.path.getsize(transcript)
-            if size > 2_000_000:
-                fh.seek(size - 2_000_000)
+            if size > _TAIL:
+                # A tail, not a backwards scan -- the previous docstring
+                # claimed backwards and the code has always read forward from
+                # a seek. Said plainly because the consequence is real: if a
+                # single record at EOF is larger than the tail, the readline()
+                # that realigns to a record boundary can consume past every
+                # remaining line and the meter goes blind.
+                fh.seek(size - _TAIL)
                 fh.readline()
             for raw in fh:
                 if b"used_percent" not in raw:
@@ -138,21 +195,59 @@ def _codex(transcript):
                     d = json.loads(raw)
                 except ValueError:
                     continue
-                p = d.get("payload") or d
-                rl = p.get("rate_limits") or {}
-                prim = rl.get("primary") or {}
-                if "used_percent" not in prim:
+                payload = d.get("payload") or d
+                rl = payload.get("rate_limits")
+                if not isinstance(rl, dict):
                     continue
-                ts = d.get("timestamp")
-                best = (prim, rl, _epoch(ts))
+                at = _epoch(d.get("timestamp"))
+                if at is not None:
+                    latest_at = at if latest_at is None else max(latest_at, at)
+                plan = rl.get("plan_type") or plan
+                for slot, minutes_default in (("primary", None),
+                                              ("secondary", None)):
+                    part = rl.get(slot)
+                    if not isinstance(part, dict):
+                        continue
+                    pct = part.get("used_percent")
+                    if not isinstance(pct, (int, float)):
+                        continue
+                    key = (slot, part.get("resets_at"))
+                    prev = groups.get(key)
+                    if prev is None or pct > prev[0]:
+                        groups[key] = (float(pct), part.get("window_minutes"),
+                                       part.get("resets_at"))
     except OSError:
         return None
-    if not best:
+    if not groups:
         return None
-    prim, rl, at = best
-    return Window(prim["used_percent"], prim.get("window_minutes"),
-                  prim.get("resets_at"), source="codex", observed_at=at,
-                  plan=rl.get("plan_type"))
+
+    # The current group for each slot is the one with the latest reset time;
+    # an older group belongs to a window that has already turned over.
+    current = {}
+    for (slot, _resets), value in groups.items():
+        held = current.get(slot)
+        if held is None or (value[2] or 0) > (held[2] or 0):
+            current[slot] = value
+
+    ranked = sorted(current.values(), key=lambda v: v[0], reverse=True)
+    if ranked[0][0] == 0.0:
+        # EVERY window in this rollout reads exactly 0.0, which is what a
+        # rollout looks like before Codex has a figure at all -- 5 of 332 real
+        # ones. Indistinguishable from no measurement, so it is refused rather
+        # than reported: "0% used" is a claim, and a number nobody measured is
+        # omitted, never zero.
+        #
+        # Note this is not a blanket rule against zero. A single window at 0%
+        # alongside a non-zero one is a genuinely fresh window on an active
+        # account, and `ranked` puts the non-zero one first, so that reading
+        # survives and keeps its real 0% in `also`.
+        return None
+    pct, minutes, resets = ranked[0]
+    win = Window(pct, minutes, resets, source="codex", observed_at=latest_at,
+                 plan=plan)
+    win.also = [Window(p, m, r, source="codex", observed_at=latest_at,
+                       plan=plan) for p, m, r in ranked[1:]]
+    return win
 
 
 def _grok(root=None):
@@ -270,21 +365,48 @@ def _epoch(value):
     return dt.timestamp()
 
 
+def provider_for(transcript):
+    """Which agent wrote this transcript, from where it lives. None if unclear.
+
+    Necessary because `read` used to try Codex and then fall through to Grok
+    whenever the first came back empty. Grok's figure is account-wide and
+    always available on a box with Grok installed, so a CLAUDE session -- which
+    has no percentage of its own -- would pick up GROK's number and, since
+    `as_dict` dropped `source`, present it as its own. Another product's meter,
+    unlabelled, in the one field the seal decision is made on.
+    """
+    if not transcript:
+        return None
+    p = str(transcript).replace("\\", "/").lower()
+    if "/.codex/" in p or "/rollout-" in p:
+        return "codex"
+    if "/.claude/" in p:
+        return "claude"
+    if "/.grok/" in p:
+        return "grok"
+    return None
+
+
 def read(transcript=None, provider=None, grok_root=None):
     """The current plan window, or None when it cannot be established.
 
     None, not a zero and not an estimate. Every caller renders an absent
     window as an omitted line, which is the same rule the rest of this project
     holds: a number nobody measured is not reported.
+
+    A provider is never guessed past what the transcript says. When the
+    transcript identifies the agent, ONLY that agent's source is consulted --
+    so a Claude session reports no window rather than borrowing one.
     """
+    known = provider or provider_for(transcript)
+    if known == "claude":
+        # No percentage exists on disk for Claude. See the module docstring.
+        return None
     candidates = []
-    if provider in (None, "codex"):
+    if known in (None, "codex"):
         candidates.append(_codex(transcript))
-    if provider in (None, "grok"):
+    if known in (None, "grok"):
         candidates.append(_grok(grok_root))
-    # Claude is deliberately absent. See the module docstring: the number is
-    # not on disk, and inventing one from token consumption would be the exact
-    # failure this project is built against.
     for w in candidates:
         if w is not None and not w.is_stale:
             return w

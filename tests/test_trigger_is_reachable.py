@@ -62,12 +62,13 @@ def _rollout(dirpath, used=92.0, resets_at=1788404361, age=30):
     return p
 
 
-def _bed(reseal="10m"):
+def _bed(reseal="10m", grace="5m"):
     """A hermetic session: own journal, own letters, own config."""
     d = tempfile.mkdtemp(prefix="dim-trig-")
     cfg = os.path.join(d, "config.toml")
     with open(cfg, "w", encoding="utf-8") as fh:
-        fh.write(f'[window]\nwrite_at = 0.85\nreseal_after = "{reseal}"\n')
+        fh.write(f'[window]\nwrite_at = 0.85\nreseal_after = "{reseal}"\n'
+                 f'grace = "{grace}"\n')
     os.environ["DIMISSORY_CONFIG"] = cfg
     return d, os.path.join(d, "journal"), os.path.join(d, "letters")
 
@@ -174,6 +175,67 @@ def test_the_refresh_interval_is_honoured():
           len(_letters(letters)) > first, _letters(letters))
 
 
+def test_grace_upgrades_a_degraded_letter_when_the_agent_finally_declares():
+    """`grace` was documented as "how long to wait for the agent's half before
+    writing without it" and was read by nothing at all.
+
+    Waiting is not implementable: blocking a tool-call hook for five minutes
+    freezes the session, and a session that dies mid-wait leaves NO letter,
+    which is strictly worse than a degraded one. So the letter goes out at
+    once and grace is how long it stays eligible to be rewritten once the
+    agent's half arrives. Same intent, better guarantee.
+    """
+    from dimissory import journal
+
+    d, jr, letters = _bed(reseal="10m", grace="5m")
+    roll = _rollout(d)
+    args = {"hook_event_name": "PostToolUse", "session_id": "grace",
+            "transcript_path": roll, "cwd": d}
+
+    out = H.handle(args, journal_root=jr, letters_dir=letters)
+    first = _letters(letters)
+    check("a letter is sealed immediately, not after a wait", len(first) == 1,
+          first)
+    body = open(os.path.join(letters, first[0]), encoding="utf-8").read()
+    check("and it is marked DEGRADED", "DEGRADED" in body.upper())
+    check("the agent is told the letter is missing its half",
+          "DEGRADED" in out and "declare" in out, out[:120])
+
+    # Nothing has changed, so a second call must not churn out another letter.
+    H.handle(args, journal_root=jr, letters_dir=letters)
+    check("with still nothing declared, no second letter",
+          _letters(letters) == first, _letters(letters))
+
+    # The agent's half arrives. THAT is the event grace waits for.
+    time.sleep(1.05)                       # letter names are second-resolution
+    journal.declare("grace", "task", "port the meter", root=jr)
+    journal.declare("grace", "next", "run the ten-task test", root=jr)
+    out2 = H.handle(args, journal_root=jr, letters_dir=letters)
+    after = _letters(letters)
+    check("declaring inside grace rewrites the letter", len(after) == 2, after)
+    body2 = open(os.path.join(letters, after[-1]), encoding="utf-8").read()
+    check("and the new letter carries what was declared",
+          "port the meter" in body2 and "ten-task" in body2)
+    check("it is no longer degraded", "DEGRADED" not in body2.upper())
+    check("and the agent is told it was rewritten",
+          "rewritten" in out2.lower(), out2[:120])
+
+    # THE NEGATIVE CONTROL: past grace, a late declaration does not trigger an
+    # immediate rewrite -- it waits for the ordinary reseal interval. Without
+    # this, "grace" would be indistinguishable from "always upgrade".
+    d2, jr2, letters2 = _bed(reseal="10m", grace="1s")
+    roll2 = _rollout(d2)
+    args2 = {"hook_event_name": "PostToolUse", "session_id": "late",
+             "transcript_path": roll2, "cwd": d2}
+    H.handle(args2, journal_root=jr2, letters_dir=letters2)
+    one = _letters(letters2)
+    time.sleep(1.4)                        # grace has now expired
+    journal.declare("late", "task", "too late", root=jr2)
+    H.handle(args2, journal_root=jr2, letters_dir=letters2)
+    check("past grace, a late declaration does not force a rewrite",
+          _letters(letters2) == one, _letters(letters2))
+
+
 def test_below_the_margin_nothing_is_sealed_at_all():
     d, jr, letters = _bed()
     roll = _rollout(d, used=40.0)
@@ -205,6 +267,7 @@ def main():
               test_a_letter_is_sealed_mid_session_using_only_registered_events,
               test_crossing_the_margin_seals_once_not_once_per_tool_call,
               test_the_refresh_interval_is_honoured,
+              test_grace_upgrades_a_degraded_letter_when_the_agent_finally_declares,
               test_below_the_margin_nothing_is_sealed_at_all,
               test_a_bad_interval_does_not_become_zero):
         t()

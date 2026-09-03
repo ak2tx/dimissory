@@ -20,8 +20,16 @@ DEFAULTS = {
         # difference from every tool that reacts to a 429: at 0.85 the agent can
         # still think, and the half it writes is the valuable half.
         "write_at": 0.85,
-        # How long to wait for the agent's half before writing without it. A
-        # degraded letter beats no letter, and it is labelled either way.
+        # How long a letter sent out WITHOUT the agent's half stays eligible
+        # to be rewritten once that half arrives.
+        #
+        # This setting previously described waiting before writing at all,
+        # which a hook cannot do: blocking a tool-call hook for five minutes
+        # freezes the session, and a session that dies mid-wait leaves no
+        # letter -- strictly worse than a degraded one. The letter now goes
+        # out immediately and improves, which is the same intent with a
+        # better guarantee. It was also read by nothing at all, which is why
+        # the description could drift this far from the behaviour.
         "grace": "5m",
         # Crossing the margin is not a one-off event: the window stays past it
         # for the rest of the session. Without an interval, every tool call
@@ -53,8 +61,8 @@ TEMPLATE = '''\
 # budget to write its half. Higher means fewer letters.
 write_at = {write_at}
 
-# How long to wait for the agent's half before writing the letter anyway.
-# A letter without it is marked DEGRADED rather than looking finished.
+# A letter sealed before the agent declared anything is marked DEGRADED. For
+# this long afterwards, it is rewritten as soon as the agent does declare.
 grace = "{grace}"
 
 # Once past write_at the window stays past it, so the letter is refreshed on

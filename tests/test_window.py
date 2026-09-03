@@ -8,16 +8,23 @@ competitor cannot skip.
 Where the number comes from was measured per provider, not assumed:
 
     Codex   in the transcript. Rollout `token_count` events carry a full
-            rate_limits object. Verified against a real rollout: 4% of a
-            300-minute window, resets_at as epoch, plan_type "plus".
+            rate_limits object with BOTH caps: primary (5h) and secondary
+            (weekly). Measured across 332 real rollouts on a live account.
     Grok    ~/.grok/logs/unified.jsonl, creditUsagePercent, account-wide.
-    Claude  NOT ON DISK. The utilization pair exists only in a live stream
-            event. The predecessor needed a supervising process to catch it.
+    Claude  NO PERCENTAGE ON DISK. Transcripts do carry a structural
+            quotaLimits object, but it is written only once the limit has
+            been hit and holds no utilization figure -- a tombstone, not a
+            meter. The utilization pair exists only in a live stream event.
 
-The last one is a limitation this suite pins down rather than papers over,
+That last one is a limitation this suite pins down rather than papers over,
 because the tempting fix -- deriving a percentage from token consumption,
 which IS on disk -- would invent the number the whole project exists not to
 invent.
+
+Three of the checks here exist because review round 1 found the meter wrong
+in ways this file had asserted were right: it read only the 5h window when
+the weekly one is routinely closer to full, it took a placeholder 0.0 as a
+measured zero, and it treated a future timestamp as fresh.
 
 Run: python3 tests/test_window.py
 """
@@ -74,14 +81,150 @@ def _rollout(used=42.0, minutes=300, when=None, extra_lines=0):
 
 
 def test_a_codex_rollout_yields_the_window():
+    # The fixture's secondary (weekly) sits at 64%, well above the 37% primary,
+    # so the BINDING window is the weekly one and that is what comes back. An
+    # earlier version of this test asserted the primary and had to be corrected
+    # when the meter stopped ignoring the cap that was actually closer to full.
     p = _rollout(used=37.0)
     w = W._codex(p)
     check("a window is parsed", w is not None)
-    check("with the percentage", w and w.used_percent == 37.0, w)
-    check("the window length", w and w.window_minutes == 300, w)
-    check("a reset time", w and w.resets_at == 1788404361, w)
+    check("the binding window is the one returned",
+          w and w.used_percent == 64.0, w)
+    check("labelled as the weekly cap", w and w.label() == "codex 1w",
+          w and w.label())
     check("and the plan", w and w.plan == "plus", w)
-    check("labelled in human terms", w and w.label() == "codex 5h", w and w.label())
+    check("the other window rides along", w and len(w.also) == 1, w and w.also)
+    check("with the primary's own figures",
+          w and w.also[0].used_percent == 37.0
+          and w.also[0].window_minutes == 300
+          and w.also[0].resets_at == 1788404361, w and w.also)
+
+
+def test_the_binding_window_is_whichever_is_nearest_full():
+    """Only `primary` was read. Measured on 332 real rollouts: 36 have the
+    weekly cap more than 20 points above primary, including primary 0% against
+    secondary 48%. A meter watching the wrong window reports room that is not
+    there."""
+    d = tempfile.mkdtemp(prefix="dim-bind-")
+    for name, prim, sec, expect_pct, expect_label in (
+            ("weekly binds", 5.0, 91.0, 91.0, "codex 1w"),
+            ("five-hour binds", 88.0, 40.0, 88.0, "codex 5h"),
+            ("the zero case seen in the wild", 0.0, 48.0, 48.0, "codex 1w")):
+        p = os.path.join(d, f"{expect_pct}.jsonl")
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time()))
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "event_msg", "timestamp": ts,
+                "payload": {"type": "token_count", "rate_limits": {
+                    "primary": {"used_percent": prim, "window_minutes": 300,
+                                "resets_at": 100},
+                    "secondary": {"used_percent": sec, "window_minutes": 10080,
+                                  "resets_at": 200}}}}) + "\n")
+        w = W._codex(p)
+        check(f"{name}: {prim}/{sec} -> {expect_pct}%",
+              w and w.used_percent == expect_pct, w)
+        check(f"{name}: labelled {expect_label}",
+              w and w.label() == expect_label, w and w.label())
+    check("and 88% of the 5h window is enough to seal",
+          W.should_seal(W.Window(88.0, 300, observed_at=time.time())) is True)
+
+
+def test_a_placeholder_zero_does_not_erase_a_real_reading():
+    """Codex writes used_percent 0.0 before it has a figure -- 16 of 300 real
+    rollouts end on one. Newest-wins turned that into a confident 0%, which
+    tells should_seal there is a whole window left.
+
+    The rule, without special-casing zero: WITHIN ONE WINDOW USAGE CANNOT GO
+    DOWN. Readings are grouped by resets_at, and the max in the current group
+    wins."""
+    d = tempfile.mkdtemp(prefix="dim-zero-")
+    p = os.path.join(d, "r.jsonl")
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time()))
+    with open(p, "w", encoding="utf-8") as fh:
+        for pct in (90.0, 0.0):            # a real reading, then a placeholder
+            fh.write(json.dumps({"type": "event_msg", "timestamp": ts,
+                "payload": {"type": "token_count", "rate_limits": {
+                    "primary": {"used_percent": pct, "window_minutes": 300,
+                                "resets_at": 555}}}}) + "\n")
+    w = W._codex(p)
+    check("the real 90% survives a trailing 0.0", w and w.used_percent == 90.0, w)
+    check("so the letter is still sealed", W.should_seal(w, 0.85) is True)
+
+    # And the rule must not suppress a GENUINE rollover: a new window has a
+    # new resets_at, and 2% of a fresh window is a real 2%.
+    p2 = os.path.join(d, "reset.jsonl")
+    with open(p2, "w", encoding="utf-8") as fh:
+        for pct, resets in ((97.0, 555), (2.0, 999)):
+            fh.write(json.dumps({"type": "event_msg", "timestamp": ts,
+                "payload": {"type": "token_count", "rate_limits": {
+                    "primary": {"used_percent": pct, "window_minutes": 300,
+                                "resets_at": resets}}}}) + "\n")
+    w2 = W._codex(p2)
+    check("but a genuine rollover to a new window is honoured",
+          w2 and w2.used_percent == 2.0, w2)
+    check("and does not seal", W.should_seal(w2, 0.85) is False)
+
+    # An ALL-zero rollout is what one looks like before Codex has any figure
+    # -- 5 of 332 real ones. Refused, because "0% used" is a claim.
+    p3 = os.path.join(d, "allzero.jsonl")
+    with open(p3, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "event_msg", "timestamp": ts,
+            "payload": {"type": "token_count", "rate_limits": {
+                "primary": {"used_percent": 0.0, "window_minutes": 300,
+                            "resets_at": 1},
+                "secondary": {"used_percent": 0.0, "window_minutes": 10080,
+                              "resets_at": 2}}}}) + "\n")
+    check("an all-zero rollout is refused, not reported as 0%",
+          W._codex(p3) is None, W._codex(p3))
+    check("so should_seal says 'no meter', not 'plenty of room'",
+          W.should_seal(W._codex(p3)) is None)
+
+    # But a real 0% window alongside a measured one is kept, and keeps its 0.
+    p4 = os.path.join(d, "onezero.jsonl")
+    with open(p4, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "event_msg", "timestamp": ts,
+            "payload": {"type": "token_count", "rate_limits": {
+                "primary": {"used_percent": 0.0, "window_minutes": 300,
+                            "resets_at": 1},
+                "secondary": {"used_percent": 48.0, "window_minutes": 10080,
+                              "resets_at": 2}}}}) + "\n")
+    w4 = W._codex(p4)
+    check("a fresh 5h window beside a 48% weekly is still a reading",
+          w4 and w4.used_percent == 48.0, w4)
+    check("and the genuine 0% survives in `also`",
+          w4 and w4.also and w4.also[0].used_percent == 0.0, w4 and w4.also)
+
+
+def test_a_reading_stamped_in_the_future_is_refused():
+    """is_stale asked only `age > MAX_AGE`, so a negative age sailed through
+    as fresh -- the failure pointing the wrong way, since refusing what it
+    cannot vouch for is the gate's entire job."""
+    ahead = W.Window(99.0, 300, source="codex",
+                     observed_at=time.time() + 7200)
+    check("a stamp two hours ahead is stale", ahead.is_stale, ahead.age)
+    check("and read() refuses it", W.should_seal(None) is None)
+    ok = W.Window(99.0, 300, source="codex", observed_at=time.time() - 5)
+    check("a normal recent stamp is not", not ok.is_stale, ok.age)
+    slack = W.Window(50.0, 300, source="codex",
+                     observed_at=time.time() + 30)
+    check("small clock skew is tolerated", not slack.is_stale, slack.age)
+
+
+def test_a_claude_session_never_borrows_another_products_meter():
+    """`read` tried Codex then fell through to Grok. Grok's figure is
+    account-wide and present on any box with Grok installed, so a CLAUDE
+    session -- which has no percentage of its own -- picked up GROK's number,
+    and as_dict dropped `source`, so it was presented unlabelled."""
+    check("a claude transcript path is recognised",
+          W.provider_for("/home/u/.claude/projects/x/abc.jsonl") == "claude")
+    check("a codex rollout path is recognised",
+          W.provider_for("/home/u/.codex/sessions/2026/rollout-x.jsonl")
+          == "codex")
+    check("an unknown path stays unknown", W.provider_for("/tmp/x.jsonl") is None)
+    check("read() returns nothing for a claude session, even with a grok log",
+          W.read(transcript="/home/u/.claude/projects/x/a.jsonl") is None)
+    w = W.Window(50.0, 300, source="codex", observed_at=time.time())
+    check("and every window carries its source",
+          w.as_dict().get("source") == "codex", w.as_dict())
 
 
 def test_the_newest_reading_wins():
@@ -223,6 +366,10 @@ def main():
     print(" the meter: the only reason 'before the wall' is possible")
     print("=" * 66)
     for t in (test_a_codex_rollout_yields_the_window,
+              test_the_binding_window_is_whichever_is_nearest_full,
+              test_a_placeholder_zero_does_not_erase_a_real_reading,
+              test_a_reading_stamped_in_the_future_is_refused,
+              test_a_claude_session_never_borrows_another_products_meter,
               test_the_newest_reading_wins,
               test_a_stale_reading_is_refused_not_returned,
               test_an_undateable_reading_is_refused,

@@ -116,7 +116,57 @@ def run(config_path=None, assume_yes=None, out=print):
         out(f"  could NOT create {d}: {e}")
         steps.append(("letters", f"failed: {e}"))
 
-    # 4. Prove it works, rather than asserting it does.
+    # 4. Install the hooks. WITHOUT THIS STEP NOTHING ELSE HERE MATTERS.
+    #
+    # Guided setup used to end at the previous line: it detected the CLIs,
+    # wrote a config, made a directory, wrote a proof letter and printed a
+    # summary of successes -- while never installing a single hook. So the
+    # agent was never asked to declare, no gate was ever armed, and no letter
+    # was ever sealed at the margin. Every automatic behaviour the tool exists
+    # for was off, after a setup that reported success on all four steps.
+    #
+    # That is the failure this file's docstring is about, committed again in
+    # the same file. Found in review round 1, not here.
+    out("")
+    if have:
+        from . import install as I
+        from .hook import hook_command
+        command = hook_command()
+        out(f"  hooks: this is what makes any of it automatic.")
+        out(f"    command to be installed: {command}")
+        installed, declined, refused = [], [], []
+        for key in have:
+            if not cfg.values.get("agents", {}).get(key, True):
+                out(f"    {I.TARGETS[key]['label']}: disabled in config,"
+                    f" skipped")
+                continue
+            try:
+                path, added = I.install(key, command=command,
+                                        assume_yes=assume_yes, out=out,
+                                        ask=None if assume_yes is None
+                                        else (lambda _p: "y"))
+            except I.InstallRefused as e:
+                out(f"    {I.TARGETS[key]['label']}: {e}")
+                refused.append(key)
+                continue
+            if path and added:
+                installed.append(key)
+            elif path:
+                installed.append(key)          # already present, still armed
+            else:
+                declined.append(key)
+        if installed:
+            steps.append(("hooks", f"armed for {', '.join(installed)}"))
+        elif refused:
+            steps.append(("hooks", f"failed: refused for "
+                                   f"{', '.join(refused)}"))
+        else:
+            # Declining is not success, and it must not be summarised as one.
+            steps.append(("hooks", "NOT installed -- nothing is automatic"))
+    else:
+        steps.append(("hooks", "no agent CLIs found, nothing to install"))
+
+    # 5. Prove it works, rather than asserting it does.
     out("")
     if _ask("  write one letter now, to prove the whole path works?",
             True, assume_yes):
@@ -144,11 +194,18 @@ def run(config_path=None, assume_yes=None, out=print):
     else:
         steps.append(("letter", "skipped"))
 
-    # 5. What actually happened -- assembled from the results above.
+    # 6. What actually happened -- assembled from the results above.
     out("")
     out("  summary")
     for label, what in steps:
         out(f"    {label:<8} {what}")
+    out("")
+    if any(l == "hooks" and w.startswith("armed") for l, w in steps):
+        out("  restart your agent CLI so it reads the new configuration.")
+    else:
+        out("  NOTE: no hooks are installed, so nothing happens"
+            " automatically yet.")
+        out("        run `dim hook --install` when you want that.")
     out("")
     out("  next:  dim write     issue a letter")
     out("         dim config    see every setting and where it came from")

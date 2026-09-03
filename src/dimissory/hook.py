@@ -188,45 +188,37 @@ def _seal_state_path(sid, journal_root):
     return os.path.join(root, ".sealed", f"{sid[:60]}.json")
 
 
-def _sealed_recently(sid, journal_root, win, reseal_after):
-    """Whether a letter for THIS window was already sealed, recently enough.
+def _seal_state(sid, journal_root):
+    """What we already know about sealing for this session, or None.
 
-    Without this the trigger is not a trigger, it is a loop. Crossing the
-    margin is not an event that happens once: the window stays past it for the
-    rest of the session, so every following tool call would seal another
-    letter -- each one shelling out to git to do it. One letter per tool call,
-    for hours.
-
-    Keyed on the window's reset time, so a genuinely NEW window seals again
-    rather than being suppressed by a marker left over from the old one. That
-    distinction is the reason this is not just a timestamp.
+    Keyed on the window's reset time by the caller, so a genuinely NEW window
+    seals again rather than being suppressed by a marker left over from the
+    old one. That distinction is why this is not just a timestamp.
     """
     try:
         with open(_seal_state_path(sid, journal_root), encoding="utf-8") as fh:
             state = json.load(fh)
     except (OSError, ValueError):
-        return False
-    if not isinstance(state, dict):
-        return False
-    if state.get("resets_at") != (win.resets_at if win else None):
-        return False                  # different window; the old letter is not about it
-    at = state.get("at")
-    if not isinstance(at, (int, float)):
-        return False                  # no usable stamp is not "sealed just now"
-    return 0 <= (time.time() - at) < reseal_after
+        return None
+    return state if isinstance(state, dict) else None
 
 
-def _record_seal(sid, journal_root, win):
+def _record_seal(sid, journal_root, win, degraded, first_crossing):
     path = _seal_state_path(sid, journal_root)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = f"{path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"resets_at": win.resets_at if win else None,
-                       "at": time.time()}, fh)
+                       "at": time.time(), "degraded": bool(degraded),
+                       "first_crossing": first_crossing}, fh)
         os.replace(tmp, path)
     except OSError:
         pass          # a lost marker costs a duplicate letter, not the session
+
+
+def _number(value, fallback):
+    return value if isinstance(value, (int, float)) else fallback
 
 
 def _handle(payload, journal_root, letters_dir):
@@ -263,25 +255,70 @@ def _handle(payload, journal_root, letters_dir):
         cfg = Config.load(None)
         win = _W.read(transcript=field(payload, "transcript"))
         due = _W.should_seal(win, float(cfg.get("window", "write_at") or 0.85))
-        if due:
-            # Seal once per window, then refresh at an interval. A letter
-            # written at 85% and never touched again is describing a session
-            # that has since run to 99%.
-            reseal = seconds(cfg.get("window", "reseal_after"), 600.0)
-            if _sealed_recently(sid, journal_root, win, reseal):
+        if not due:
+            return ""
+
+        # Seal once per window, then refresh at an interval. A letter written
+        # at 85% and never touched again is describing a session that has
+        # since run to 99%.
+        reseal = seconds(cfg.get("window", "reseal_after"), 600.0)
+        grace = seconds(cfg.get("window", "grace"), 300.0)
+        declared = _declared_anything(sid, journal_root)
+        now = time.time()
+
+        state = _seal_state(sid, journal_root)
+        same_window = (state is not None and state.get("resets_at")
+                       == (win.resets_at if win else None))
+        first_crossing = (_number(state.get("first_crossing"), now)
+                          if same_window else now)
+
+        upgrading = False
+        if same_window:
+            # GRACE. The setting used to promise "wait this long for the
+            # agent's half before writing without it", which a hook cannot
+            # do: blocking a PostToolUse hook for five minutes freezes the
+            # user's session, and if the session then dies mid-wait there is
+            # no letter at all -- strictly worse than a degraded one.
+            #
+            # So the letter goes out IMMEDIATELY, and grace is the window
+            # during which a letter that went out without the agent's half is
+            # UPGRADED the moment that half arrives. Same intent, better
+            # guarantee: there is always a letter on disk, and it improves.
+            upgrading = (bool(state.get("degraded")) and declared
+                         and (now - first_crossing) < grace)
+            if not upgrading and (now - _number(state.get("at"), 0.0)) < reseal:
                 return ""
-            path = seal(sid, payload, journal_root, letters_dir)
-            if path:
-                _record_seal(sid, journal_root, win)
-                return json.dumps({"hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext":
-                        f"dimissory: {win.used_percent:.0f}% of your "
-                        f"{win.label()} window is gone, so a handoff letter was "
-                        f"sealed at {path}. If your next action has changed, "
-                        f"record it now with `dim declare --session {sid} "
-                        f"--next \"...\"` -- there may not be a later chance."}})
-        return ""
+
+        path = seal(sid, payload, journal_root, letters_dir)
+        if not path:
+            return ""
+        _record_seal(sid, journal_root, win, degraded=not declared,
+                     first_crossing=first_crossing)
+
+        head = (f"dimissory: {win.used_percent:.0f}% of your {win.label()} "
+                f"window is gone, so a handoff letter was sealed at {path}.")
+        if declared:
+            tail = (f" If your next action has changed, record it now with "
+                    f"`{dim_command()} declare --session {sid} --next \"...\"`"
+                    f" -- there may not be a later chance.")
+            if upgrading:
+                head = (f"dimissory: the handoff letter at {path} has been "
+                        f"rewritten to include what you declared.")
+                tail = ""
+        else:
+            # The letter just written is missing the half only the agent can
+            # supply, and it is labelled DEGRADED. Saying so is the point:
+            # this is the last reliable moment to fix it.
+            mins = max(1, int(grace // 60))
+            tail = (f" It is marked DEGRADED because you have declared "
+                    f"nothing, so it carries no task and no next action. Run "
+                    f"this now and the letter will be rewritten with it:\n"
+                    f"  {dim_command()} declare --session {sid} --task "
+                    f"\"<what this session is for>\" --next \"<the exact next "
+                    f"action>\"\nAfter about {mins} minute(s) the degraded "
+                    f"letter stands as final.")
+        return json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PostToolUse", "additionalContext": head + tail}})
 
     if event in ("precompact", "sessionend"):
         path = seal(sid, payload, journal_root, letters_dir)
@@ -301,7 +338,16 @@ def seal(sid, payload, journal_root=None, letters_dir=None):
     """Fold the journal and the world into a letter. Returns its path or None."""
     import time
     cwd = field(payload, "cwd") or os.getcwd()
-    letters = os.path.expanduser(letters_dir or "~/.dimissory/letters")
+    # The CONFIGURED directory, not a hardcoded one. `dim show` and `dim
+    # resume` look in `letters.dir` from the config; this sealed to
+    # ~/.dimissory/letters regardless. Set `letters.dir` and the hook wrote
+    # letters where nothing would ever look for them, reporting success both
+    # times -- the predecessor's "wrong location reported as success", which
+    # install.py keeps a whole docstring about.
+    if letters_dir is None:
+        from .config import Config
+        letters_dir = Config.load(None).letters_dir
+    letters = os.path.expanduser(letters_dir)
     jroot = os.path.expanduser(journal_root or "~/.dimissory/journal")
     ours = (letters, jroot)
 
