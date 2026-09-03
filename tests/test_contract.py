@@ -155,11 +155,91 @@ def test_an_unusable_check_is_refused_at_write_time():
     check("a real one is accepted", Check("git status", "clean").command == "git status")
 
 
+def test_a_grok_session_directory_is_read_as_a_transcript():
+    """Found by running the product on a real Grok box, not by reviewing it.
+
+    Grok hands the hook a session DIRECTORY, not a file. A real end-to-end run
+    sealed a letter whose Observed block read `calls 0 observed in the
+    transcript tail` -- which is a MEASUREMENT, "this session made no tool
+    calls", about a session that had just made six. Reporting zero where the
+    answer was six is precisely the defect this project exists to prevent, and
+    four rounds of source review never saw it.
+    """
+    import tempfile, json as _json
+    from dimissory.transcript import recent_calls, resolve
+
+    d = tempfile.mkdtemp(prefix="dim-grokt-")
+    session = os.path.join(d, "01a0-session-id")
+    os.makedirs(session)
+    # The real shape, copied from a live Grok chat_history.jsonl: `tool_calls`
+    # on an assistant record, with `arguments` as a JSON STRING.
+    with open(os.path.join(session, "chat_history.jsonl"), "w",
+              encoding="utf-8") as fh:
+        fh.write(_json.dumps({"type": "system", "content": "..."}) + "\n")
+        fh.write(_json.dumps({"type": "assistant", "content": "", "tool_calls": [
+            {"id": "call-0", "name": "read_file",
+             "arguments": '{"target_file":"/tmp/e2e/work/calc.py"}'},
+            {"id": "call-1", "name": "run_terminal_command",
+             "arguments": '{"command":"git commit","description":"commit it"}'},
+        ]}) + "\n")
+        fh.write(_json.dumps({"type": "tool_result", "content": "ok"}) + "\n")
+
+    # The shape the hook is ACTUALLY handed: updates.jsonl, measured from a
+    # live payload dump after the directory theory failed to fix anything.
+    upd = os.path.join(session, "updates.jsonl")
+    with open(upd, "w", encoding="utf-8") as fh:
+        fh.write(_json.dumps({"params": {"update": {
+            "sessionUpdate": "tool_call", "title": "read_file",
+            "rawInput": {"target_file": "calc.py"},
+            "_meta": {"x.ai/tool": {"name": "read_file"}}}}}) + "\n")
+        fh.write(_json.dumps({"params": {"update": {
+            "sessionUpdate": "tool_call_update", "title": "Read `calc.py`"}}}) + "\n")
+    got = recent_calls(upd)
+    check("the updates.jsonl stream yields its tool calls",
+          got is not None and len(got) == 1, got)
+    check("named from the x.ai metadata, not the display title",
+          got and got[0][0] == "read_file", got)
+    check("a tool_call_update is not counted as a second call",
+          got and len(got) == 1, got)
+    check("and its arguments are hashed",
+          got and len(got[0][2]) == 16 and "calc.py" not in got[0][2], got)
+
+    check("a directory resolves to the history file",
+          os.path.basename(resolve(session)) == "chat_history.jsonl",
+          resolve(session))
+    calls = recent_calls(session)
+    check("and its tool calls are found", calls is not None and len(calls) == 2,
+          calls)
+    check("with their real names",
+          [c[0] for c in calls] == ["read_file", "run_terminal_command"], calls)
+    check("a human-readable step comes from target_file or description",
+          calls[0][1].endswith("calc.py") and calls[1][1] == "commit it", calls)
+    check("and the arguments are HASHED, never copied",
+          all(len(c[2]) == 16 and "calc.py" not in c[2] for c in calls), calls)
+
+    # A directory with nothing readable in it is None, not zero calls.
+    empty = os.path.join(d, "empty-session")
+    os.makedirs(empty)
+    check("an unreadable session directory is None, not 0 calls",
+          recent_calls(empty) is None, recent_calls(empty))
+
+    # And the Claude/Codex shape must still work -- one reader, two vendors.
+    other = os.path.join(d, "claude.jsonl")
+    with open(other, "w", encoding="utf-8") as fh:
+        fh.write(_json.dumps({"message": {"content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "ls", "description": "list"}}]}}) + "\n")
+    got = recent_calls(other)
+    check("the anthropic shape still reads",
+          got and got[0][0] == "Bash" and got[0][1] == "list", got)
+
+
 def main():
     print("=" * 64)
     print(" the letter says which parts you may believe, and on whose word")
     print("=" * 64)
-    for t in (test_an_unmeasured_value_is_never_a_number,
+    for t in (test_a_grok_session_directory_is_read_as_a_transcript,
+              test_an_unmeasured_value_is_never_a_number,
               test_unmeasured_fields_are_omitted_not_zero_filled,
               test_declared_content_is_always_attributed,
               test_a_brief_without_the_agents_half_looks_incomplete,
