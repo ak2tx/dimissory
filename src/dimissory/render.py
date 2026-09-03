@@ -86,7 +86,21 @@ def _lines(observed) -> list:
                 tail = f", resets {_t.strftime('%a %H:%M', when)}"
             except (TypeError, ValueError, OSError):
                 tail = ""            # unparseable: omit, never print a guess
-        out.append(f"window      {k['window_used_percent']:.0f}% used{tail}")
+        # NAME the window. "84% used" does not say 84% of what, and the meter
+        # reports whichever cap is nearest full -- which measured as the weekly
+        # one in 71 of 295 real readings.
+        which = k.get("window_label")
+        head = f"window      {k['window_used_percent']:.0f}% used"
+        if isinstance(which, str) and which:
+            head = f"window      {which}  {k['window_used_percent']:.0f}% used"
+        out.append(head + tail)
+        # The other caps on the same account. Omitted when there are none,
+        # never printed as a zero.
+        for other in (k.get("window_also") or ()):
+            pct = other.get("used_percent")
+            name = other.get("window") or "other"
+            if isinstance(pct, (int, float)):
+                out.append(f"            {name}  {pct:.0f}% used")
     return out
 
 

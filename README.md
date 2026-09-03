@@ -104,10 +104,44 @@ deliberately no exit code meaning "probably fine".
 | Observed block — git, dirty paths | working |
 | Verify block — derive, render, compare, fail | working |
 | Transcript reading — bounded tail, hashed args | working |
+| Agent hooks — install, ask, gate | working, all three CLIs |
+| Plan-window meter — Codex, Grok | working, both caps |
+| Seal before the wall, on the tool-call heartbeat | working |
+| Plan-window meter — Claude | **at the wall only**, see below |
 | Observed block — last command and exit code | not yet |
-| Plan-window meter | porting |
-| Agent hooks — ask for the declared half | not yet |
+| `dim status` | not yet, prints a stub |
+| Pruning old letters (`letters.keep`) | not yet, setting is inert |
 | Cross-account delivery | not yet |
+
+### The one that matters: Claude has no meter
+
+For Codex and Grok, dimissory reads the plan window off disk and seals a
+letter at 85% — before the wall, which is the whole claim.
+
+**On Claude Code it cannot.** No utilization percentage is written to disk
+anywhere. Transcripts carry a `quotaLimits` object, but it is written only
+once a limit has already been hit and contains no percentage — measured
+across 81 records on a live machine, every one `status: "rejected"`. So on
+Claude, dimissory seals the moment the wall is hit and tells you when the
+window reopens. That is useful and it is *not* the product's central claim.
+Deriving a percentage from token consumption would invent the denominator
+this project exists not to invent.
+
+The likely fix is Claude's statusline, which receives a real
+`rate_limits.five_hour.used_percentage` every turn. Not built yet.
+
+### The gate is a request, not a guarantee
+
+The `Stop` hook blocks a turn that declared nothing and feeds back what to
+run. It blocks **once**: the continuation carries `stop_hook_active`, and
+blocking again is how a gate becomes a trap that a user has to kill. So an
+agent that ignores the block finishes anyway, and the letter is sealed
+DEGRADED rather than not sealed at all.
+
+Never trapping your session is the higher duty, so this is deliberate — but
+it means nothing here forces the agent to write its half. The journal
+narrows the problem by collecting declarations as work happens instead of
+asking for everything at the end. It does not close it.
 
 ## How this loses
 

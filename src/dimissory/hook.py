@@ -22,14 +22,20 @@ TWO MECHANISMS, because they are not equally strong:
         time it was measured on Claude Code and Codex, and not at all on Grok.
 
   GATE  Stop returns {"decision": "block", "reason": ...}, which refuses to let
-        the turn end and feeds the reason back. It is not a request, and it is
-        the only thing here that does not depend on the model choosing to
-        cooperate. Grok has it. Claude Code has it. Codex's event registry has
-        no bare turn-end Stop, so Codex gets the ask alone.
+        the turn end and feeds the reason back. Grok has it. Claude Code has
+        it. Codex's event registry has no bare turn-end Stop, so Codex gets
+        the ask alone.
 
-The gate must never trap an agent in a loop, so it fires once: the payload
-carries `stopHookActive` (already continuing because of a stop hook) and it
-yields immediately when that is set.
+The gate is STRONGER THAN THE ASK AND STILL NOT A GUARANTEE, and this used to
+claim otherwise -- "the only thing here that does not depend on the model
+choosing to cooperate", which is false. It blocks ONCE: the continuation
+carries `stopHookActive`, and blocking again from there is how a gate becomes
+a trap the user has to kill. So an agent that ignores the block finishes
+anyway, and the letter is sealed DEGRADED rather than not sealed at all.
+
+That is deliberate -- never trapping a user's session is the higher duty --
+but it means the gate raises the cost of not declaring rather than removing
+the option, and the docstring should say which.
 
 WHAT THIS STILL DOES NOT DO: make the CONTENT good. A gate can require that
 `dim declare` was called; it cannot require that what the agent wrote is worth
@@ -221,6 +227,64 @@ def _number(value, fallback):
     return value if isinstance(value, (int, float)) else fallback
 
 
+def _no_meter(sid, payload, journal_root, letters_dir, cfg):
+    """What to do on a host with no percentage: watch for the wall itself.
+
+    Claude publishes no utilization figure anywhere on disk, so there is no
+    85% to seal at. It DOES write a `quotaLimits` tombstone once a limit has
+    actually been hit -- status "rejected", the window kind, and when it
+    reopens. That is after the wall rather than before it, and saying so is
+    the point: it is the difference between this project's claim and what it
+    can deliver on Claude today.
+
+    Sealing here is still worth it. A letter written the moment the wall is
+    hit beats nothing, and the reset time answers the first question the next
+    session has. It is labelled as an at-the-wall letter so nobody mistakes it
+    for the before-the-wall one.
+
+    This is also where `_claude_wall` stopped being dead code -- review found
+    it added, tested, and wired to nothing.
+    """
+    from . import window as _W
+    from .config import seconds
+
+    wall = _W._claude_wall(field(payload, "transcript"))
+    if not wall or wall.get("status") != "rejected":
+        return ""
+    at = wall.get("observed_at")
+    if not isinstance(at, (int, float)) or (time.time() - at) > _W.MAX_AGE:
+        return ""              # an old tombstone is not this session's wall
+
+    reseal = seconds(cfg.get("window", "reseal_after"), 600.0)
+    state = _seal_state(sid, journal_root)
+    if state is not None and state.get("resets_at") == wall.get("resets_at") \
+            and (time.time() - _number(state.get("at"), 0.0)) < reseal:
+        return ""
+
+    path = seal(sid, payload, journal_root, letters_dir)
+    if not path:
+        return ""
+    declared = _declared_anything(sid, journal_root)
+    _record_seal(sid, journal_root,
+                 _W.Window(0.0, resets_at=wall.get("resets_at"),
+                           source="claude", observed_at=time.time()),
+                 degraded=not declared, first_crossing=time.time())
+    when = ""
+    if isinstance(wall.get("resets_at"), (int, float)):
+        when = (" It reopens at "
+                + time.strftime("%H:%M", time.localtime(wall["resets_at"]))
+                + ".")
+    tail = ("" if declared else
+            f" It is marked DEGRADED because nothing was declared. Run "
+            f"`{dim_command()} declare --session {sid} --task \"...\" --next "
+            f"\"...\"` and it will be rewritten.")
+    return json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext":
+            f"dimissory: your {wall.get('kind') or 'plan'} limit has been hit, "
+            f"so a handoff letter was sealed at {path}.{when}{tail}"}})
+
+
 def _handle(payload, journal_root, letters_dir):
     event = normalise_event(field(payload, "event"))
     sid = field(payload, "session")
@@ -254,8 +318,21 @@ def _handle(payload, journal_root, letters_dir):
         from .config import Config, seconds
         cfg = Config.load(None)
         win = _W.read(transcript=field(payload, "transcript"))
-        due = _W.should_seal(win, float(cfg.get("window", "write_at") or 0.85))
-        if not due:
+        # `write_at` read WITHOUT `or`. `cfg.get(...) or 0.85` turned a
+        # configured 0 into 0.85, so the one setting that means "always seal"
+        # silently could not.
+        at = cfg.get("window", "write_at")
+        at = float(at) if isinstance(at, (int, float)) else 0.85
+        due = _W.should_seal(win, at)
+        # None and False are different answers and this used to collapse them.
+        # should_seal goes out of its way to distinguish "no meter at all" from
+        # "plenty of room left"; discarding that one line later made a Claude
+        # session -- which has no meter -- indistinguishable from a session
+        # with budget to spare, which is the exact conflation this project's
+        # UNMEASURED singleton exists to prevent.
+        if due is None:
+            return _no_meter(sid, payload, journal_root, letters_dir, cfg)
+        if due is False:
             return ""
 
         # Seal once per window, then refresh at an interval. A letter written
@@ -385,11 +462,41 @@ def seal(sid, payload, journal_root=None, letters_dir=None):
                                                our_dirs=ours,
                                                porcelain=porcelain))
     os.makedirs(letters, exist_ok=True)
-    name = f"{sid[:60]}-{time.strftime('%Y%m%dT%H%M%S')}.md"
-    path = os.path.join(letters, name)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(render(brief))
-    return path
+    # THE NAME IS CLAIMED, NOT COMPOSED AND HOPED FOR.
+    #
+    # This used to be one `open(path, "w")` on a name with one-second
+    # resolution. Registering PostToolUse put that line on the one event hosts
+    # run CONCURRENTLY, and review measured the result: two seals in the same
+    # second opened the same path and the last writer won -- losing an UPGRADED
+    # letter to the degraded one it was meant to replace, while the seal marker
+    # recorded the upgrade as done. The letter is the artifact this package
+    # exists to produce, so that is the worst possible place for a race.
+    #
+    # A pid and a microsecond stamp would make a collision unlikely. O_EXCL
+    # makes it impossible, across processes and within one, which is the same
+    # reasoning install._backup now uses for the same class of bug.
+    #
+    # It also invalidated a test of mine: the grace test slept 1.05s "because
+    # letter names are second-resolution", working around this rather than
+    # catching it. Sleeping past a race does not remove it.
+    # The counter is ALWAYS present and zero-padded so that sorting by name
+    # gives the same order as sorting by time. An unpadded, sometimes-absent
+    # suffix does not: "-1.md" sorts BEFORE ".md", because '-' is 0x2D and '.'
+    # is 0x2E, so the newest letter of a second stopped being the last one by
+    # name. `_latest` uses mtime and was unaffected, but leaving the two
+    # orderings disagreeing is a trap for the next reader -- and it caught a
+    # test in this suite within minutes of the change.
+    base = f"{sid[:60]}-{time.strftime('%Y%m%dT%H%M%S')}"
+    for n in range(1000):
+        path = os.path.join(letters, f"{base}-{n:03d}.md")
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(render(brief))
+        return path
+    return None
 
 
 def main(argv=None, stdin=None):

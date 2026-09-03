@@ -207,13 +207,28 @@ def test_grace_upgrades_a_degraded_letter_when_the_agent_finally_declares():
           _letters(letters) == first, _letters(letters))
 
     # The agent's half arrives. THAT is the event grace waits for.
-    time.sleep(1.05)                       # letter names are second-resolution
+    #
+    # No sleep here. This used to sleep 1.05s "because letter names are
+    # second-resolution", which meant the test worked AROUND a real race
+    # instead of catching it: in the same second the upgrade overwrote the
+    # degraded letter it was meant to replace. Review found it by doing what
+    # this line now does. The names are claimed with O_EXCL, so the upgrade
+    # lands beside the original within the same second.
     journal.declare("grace", "task", "port the meter", root=jr)
     journal.declare("grace", "next", "run the ten-task test", root=jr)
     out2 = H.handle(args, journal_root=jr, letters_dir=letters)
     after = _letters(letters)
     check("declaring inside grace rewrites the letter", len(after) == 2, after)
-    body2 = open(os.path.join(letters, after[-1]), encoding="utf-8").read()
+    # Read the path the HANDLER reported, not a filename this test guessed.
+    # Guessing is how the previous version broke: it took the last name in
+    # sorted order, which stopped being the newest letter the moment the names
+    # gained a suffix. The handler tells the agent a path, and that path is
+    # exactly what the agent will open -- so it is what should be asserted on.
+    upgraded = json.loads(out2)["hookSpecificOutput"]["additionalContext"]
+    upgraded = [w for w in upgraded.split() if w.endswith(".md")][0].rstrip(".")
+    check("the path the agent is given is the newer letter",
+          os.path.basename(upgraded) == sorted(after)[-1], (upgraded, after))
+    body2 = open(upgraded, encoding="utf-8").read()
     check("and the new letter carries what was declared",
           "port the meter" in body2 and "ten-task" in body2)
     check("it is no longer degraded", "DEGRADED" not in body2.upper())
@@ -234,6 +249,30 @@ def test_grace_upgrades_a_degraded_letter_when_the_agent_finally_declares():
     H.handle(args2, journal_root=jr2, letters_dir=letters2)
     check("past grace, a late declaration does not force a rewrite",
           _letters(letters2) == one, _letters(letters2))
+
+
+def test_two_seals_in_the_same_second_do_not_overwrite_each_other():
+    """The letter is the artifact this package exists to produce, so a race on
+    its filename is the worst place for one.
+
+    The name had one-second resolution and was opened with a plain
+    open(path, "w"). Registering PostToolUse put that on the one event hosts
+    run CONCURRENTLY, and review measured the consequence: an UPGRADED letter
+    overwriting -- or being overwritten by -- the degraded one it was meant to
+    replace, while the seal marker recorded the upgrade as done.
+    """
+    d, jr, letters = _bed()
+    roll = _rollout(d)
+    payload = {"hook_event_name": "PostToolUse", "session_id": "same-second",
+               "transcript_path": roll, "cwd": d}
+    paths = [H.seal("same-second", payload, jr, letters) for _ in range(6)]
+    check("six seals inside one second produce six letters",
+          len(set(paths)) == 6 and len(_letters(letters)) == 6,
+          f"{len(set(paths))} unique names, {len(_letters(letters))} files")
+    check("and every one of them is non-empty",
+          all(os.path.getsize(p) > 0 for p in paths))
+    check("no seal returned the same path twice",
+          len(paths) == len(set(paths)), paths)
 
 
 def test_below_the_margin_nothing_is_sealed_at_all():
@@ -268,6 +307,7 @@ def main():
               test_crossing_the_margin_seals_once_not_once_per_tool_call,
               test_the_refresh_interval_is_honoured,
               test_grace_upgrades_a_degraded_letter_when_the_agent_finally_declares,
+              test_two_seals_in_the_same_second_do_not_overwrite_each_other,
               test_below_the_margin_nothing_is_sealed_at_all,
               test_a_bad_interval_does_not_become_zero):
         t()

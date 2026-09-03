@@ -223,10 +223,25 @@ def _codex(transcript):
 
     # The current group for each slot is the one with the latest reset time;
     # an older group belongs to a window that has already turned over.
+    #
+    # `resets_at` is Optional, and the first version compared `(value[2] or 0)`
+    # -- which sorts an ABSENT reset time below every real one. So a reading
+    # from a newer window that happened to carry no resets_at lost to the old
+    # window's peak, pinning a stale high figure across a rollover and sealing
+    # forever after. A non-numeric value also made the comparison raise, and
+    # `handle` swallows exceptions, so the seal became a silent no-op.
+    #
+    # Order deliberately: readings WITH a reset time rank by it; a reading
+    # without one is only used when nothing better exists for that slot, since
+    # "I do not know which window this belongs to" cannot outrank "I do".
+    def rank(value):
+        r = value[2]
+        return (1, float(r)) if isinstance(r, (int, float)) else (0, 0.0)
+
     current = {}
     for (slot, _resets), value in groups.items():
         held = current.get(slot)
-        if held is None or (value[2] or 0) > (held[2] or 0):
+        if held is None or rank(value) > rank(held):
             current[slot] = value
 
     ranked = sorted(current.values(), key=lambda v: v[0], reverse=True)
@@ -378,12 +393,17 @@ def provider_for(transcript):
     if not transcript:
         return None
     p = str(transcript).replace("\\", "/").lower()
-    if "/.codex/" in p or "/rollout-" in p:
-        return "codex"
-    if "/.claude/" in p:
-        return "claude"
-    if "/.grok/" in p:
-        return "grok"
+    # The HOME-directory markers are checked first, all of them, before the
+    # weaker filename hint. `/rollout-` used to be tested alongside `/.codex/`
+    # and therefore before `/.claude/`, so a real Claude transcript under a
+    # directory containing "rollout-" classified as codex.
+    for marker, name in (("/.claude/", "claude"),
+                         ("/.codex/", "codex"),
+                         ("/.grok/", "grok")):
+        if marker in p:
+            return name
+    if "/rollout-" in p:
+        return "codex"          # a rollout filename, outside any known home
     return None
 
 

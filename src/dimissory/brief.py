@@ -77,6 +77,13 @@ class Observed:
     calls: object = UNMEASURED           # tuple[Call, ...] from the transcript
     window_used_percent: object = UNMEASURED
     window_resets_at: object = UNMEASURED
+    # WHICH window the percentage above refers to ("codex 5h", "codex 1w"),
+    # and the other caps on the same account. A bare percentage with no window
+    # named is not a measurement a reader can act on, and the meter can
+    # legitimately be reporting a different provider's cap than the session
+    # they are in.
+    window_label: object = UNMEASURED
+    window_also: object = UNMEASURED
     started_at: object = UNMEASURED
     written_at: object = UNMEASURED
 

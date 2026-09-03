@@ -85,14 +85,22 @@ def observe(cwd=None, transcript=None, window=None, session_started=None,
         if found is not None:
             calls = found
 
-    used = resets = UNMEASURED
+    used = resets = label = others = UNMEASURED
     if window:
         used = window.get("used_percent", UNMEASURED)
         resets = window.get("resets_at", UNMEASURED)
+        # Which meter this came from, and the OTHER caps on the same account.
+        # Both were computed and then dropped here, so a letter could report
+        # "84% used" while the weekly cap sat at 96% and never say which
+        # window it meant -- and 36 of 332 measured rollouts have the weekly
+        # cap well above the five-hour one.
+        label = window.get("window") or UNMEASURED
+        others = window.get("also") or UNMEASURED
 
     return Observed(
         head=head, head_subject=subject, dirty=dirty,
         calls=calls, window_used_percent=used, window_resets_at=resets,
+        window_label=label, window_also=others,
         started_at=session_started if session_started else UNMEASURED,
         written_at=time.strftime("%Y-%m-%d %H:%M:%S"),
     )

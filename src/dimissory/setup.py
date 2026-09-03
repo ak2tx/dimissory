@@ -52,11 +52,21 @@ def _ask(prompt, default=True, assume=None):
     return default if not answer else answer.startswith("y")
 
 
-def run(config_path=None, assume_yes=None, out=print):
+def run(config_path=None, assume_yes=None, out=print, hook_paths=None):
     """Guided setup. Safe to re-run; nothing here overwrites without asking.
 
     Returns an exit code. Every line printed is something that was checked,
     not something that was assumed.
+
+    `hook_paths` maps a target key to the file its hooks should be written to.
+    It exists because it has to: once this function installs hooks, calling it
+    with `assume_yes=True` and no redirection EDITS THE CALLER'S REAL
+    ~/.claude/settings.json. `config_path` redirected the config and nothing
+    else, so the suite's own idempotence test silently installed a working
+    PostToolUse hook into a live settings file -- which is, word for word, the
+    thing install.py's docstring says the predecessor did while testing the fix
+    for having done it once already. Third time in this lineage. A test that
+    can reach a real home is not a test.
     """
     steps = []                       # (label, what actually happened)
 
@@ -142,9 +152,8 @@ def run(config_path=None, assume_yes=None, out=print):
                 continue
             try:
                 path, added = I.install(key, command=command,
-                                        assume_yes=assume_yes, out=out,
-                                        ask=None if assume_yes is None
-                                        else (lambda _p: "y"))
+                                        path=(hook_paths or {}).get(key),
+                                        assume_yes=assume_yes, out=out)
             except I.InstallRefused as e:
                 out(f"    {I.TARGETS[key]['label']}: {e}")
                 refused.append(key)
@@ -155,14 +164,24 @@ def run(config_path=None, assume_yes=None, out=print):
                 installed.append(key)          # already present, still armed
             else:
                 declined.append(key)
-        if installed:
+        # Reported in order of severity, and a partial install says so rather
+        # than letting the first success speak for the whole step. Review:
+        # "mixed installed + refused: first branch wins, summary is 'armed for
+        # X', refused is only a loop print, exit 0."
+        if refused:
+            steps.append(("hooks", "failed: refused for "
+                                   + ", ".join(refused)
+                                   + (f" (armed for {', '.join(installed)})"
+                                      if installed else "")))
+        elif installed:
             steps.append(("hooks", f"armed for {', '.join(installed)}"))
-        elif refused:
-            steps.append(("hooks", f"failed: refused for "
-                                   f"{', '.join(refused)}"))
         else:
-            # Declining is not success, and it must not be summarised as one.
-            steps.append(("hooks", "NOT installed -- nothing is automatic"))
+            # Declining is not success, and it must not be summarised as one
+            # OR exit as one -- `dim hook --install` already returns 1 for
+            # "nothing was installed", and `dim setup --yes` returning 0 with
+            # every automatic behaviour off makes a CI check meaningless.
+            steps.append(("hooks", "failed: NOT installed -- nothing is "
+                                   "automatic"))
     else:
         steps.append(("hooks", "no agent CLIs found, nothing to install"))
 

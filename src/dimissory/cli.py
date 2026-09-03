@@ -117,8 +117,13 @@ def cmd_write(args):
 
 def _latest(d):
     try:
+        # mtime first, then name as a tiebreak. Two letters can share an mtime
+        # on a coarse filesystem, and "whichever the directory happened to
+        # yield first" is not an answer -- letter names now sort
+        # chronologically, so the name settles it the same way time would.
         files = sorted((os.path.join(d, f) for f in os.listdir(d)
-                        if f.endswith(".md")), key=os.path.getmtime)
+                        if f.endswith(".md")),
+                       key=lambda p: (os.path.getmtime(p), os.path.basename(p)))
     except OSError:
         return None
     return files[-1] if files else None
