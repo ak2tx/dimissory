@@ -10,10 +10,12 @@ out — the five-hour cap, the weekly cap, a session about to be compacted —
 `dimissory` writes a portable letter of transfer, so the next session continues
 the work instead of reconstructing it. On another account, or another model.
 
-> **Status: early. `0.0.1` is a skeleton.** The brief format, the trust
-> contract and the verify mechanism work and are tested. The plan-window meter
-> and the agent-side hooks are being ported from the predecessor project. There
-> is no release on PyPI yet.
+> **Status: early, `0.0.1`, no PyPI release yet.** The brief format, the trust
+> contract, the verify mechanism, the agent hooks and the plan-window meter all
+> work and are tested — 428 checks across 10 files. What is *not* done is listed
+> under [What is built](#what-is-built), including the one gap that matters:
+> `codex exec` has no seal path. Claude needs `dim statusline --install` as a
+> second step, and `dim status` will tell you if you skipped it.
 
 ---
 
