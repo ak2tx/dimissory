@@ -52,6 +52,7 @@ def recent_calls(path, limit=LIMIT, tail_bytes=TAIL_BYTES):
                 except ValueError:
                     continue                   # a torn tail line is normal
                 out.extend(_anthropic_shape(d))
+                out.extend(_codex_shape(d))
                 out.extend(_grok_chat_shape(d))
                 out.extend(_grok_updates_shape(d))
     except OSError:
@@ -120,6 +121,38 @@ def _anthropic_shape(d):
         args = c.get("input")
         yield (c.get("name"), _step_from(args),
                args_hash(args) if args is not None else "(none)")
+
+
+def _codex_shape(d):
+    """Codex rollouts: response_item payloads of type custom_tool_call.
+
+    The third transcript shape and the second silent zero. A real Codex
+    session made fifteen tool calls and the letter's Observed block said
+    `calls 0 observed in the transcript tail` -- a MEASUREMENT, about a
+    session that had done plenty. dimissory had never read a Codex tool call.
+
+        {"type": "response_item",
+         "payload": {"type": "custom_tool_call", "name": "exec",
+                     "input": "const r = await tools.exec_command({...})"}}
+
+    `input` is a JavaScript source string rather than JSON, so it is hashed as
+    the string it is and the human hint is its first line. Hashing it still
+    matters: the letter must never carry the command itself out of the machine.
+    """
+    if d.get("type") != "response_item":
+        return
+    p = d.get("payload")
+    if not isinstance(p, dict) or p.get("type") != "custom_tool_call":
+        return
+    name = p.get("name")
+    if not name:
+        return
+    args = p.get("input")
+    step = ""
+    if isinstance(args, str):
+        first = args.strip().splitlines()[0] if args.strip() else ""
+        step = first[:48]
+    yield (name, step, args_hash(args) if args is not None else "(none)")
 
 
 def _grok_updates_shape(d):

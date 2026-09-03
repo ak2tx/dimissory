@@ -315,11 +315,40 @@ def test_a_torn_final_line_is_counted_and_a_complete_one_is_kept():
     check("a parseable non-entry is refused too", damaged3 == 1, damaged3)
 
 
+def test_the_journal_can_be_pointed_somewhere_writable():
+    """Measured on Codex: the agent complied on its FIRST tool call, ran
+    `dim declare` with a real task and next action, and got back
+
+        OSError: [Errno 30] Read-only file system: '/home/ak2tx/.dimissory'
+
+    as a raw traceback -- because Codex runs agent tools in a sandbox where
+    $HOME is read-only while the HOOK runs outside it and writes there fine.
+    The agent did everything right and the letter came out DEGRADED with
+    nothing anywhere saying why.
+    """
+    root = _root()
+    os.environ["DIMISSORY_HOME"] = root
+    try:
+        check("DIMISSORY_HOME moves the journal",
+              J.default_root() == os.path.join(root, "journal"),
+              J.default_root())
+        J.declare("s", "task", "recorded somewhere writable")
+        values, _a, _d = J.read("s")
+        check("and a declaration lands there",
+              values.get("task") == "recorded somewhere writable", values)
+    finally:
+        os.environ.pop("DIMISSORY_HOME", None)
+    check("without it, the default is unchanged",
+          J.default_root().endswith(os.path.join(".dimissory", "journal")),
+          J.default_root())
+
+
 def main():
     print("=" * 64)
     print(" the agent declares as it works; the trigger only seals it")
     print("=" * 64)
-    for t in (test_no_two_processes_ever_write_the_same_file,
+    for t in (test_the_journal_can_be_pointed_somewhere_writable,
+              test_no_two_processes_ever_write_the_same_file,
               test_concurrent_processes_do_not_lose_or_tear_a_line,
               test_current_fields_replace_and_accumulating_fields_do_not,
               test_an_undeclared_field_has_no_age_rather_than_a_zero,

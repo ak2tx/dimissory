@@ -276,6 +276,33 @@ def cmd_declare(args):
             except _J.JournalError as e:
                 print(f"dim declare: {e}", file=sys.stderr)
                 return 1
+            except OSError as e:
+                # THE AGENT IS READING THIS. Measured on Codex: it complied
+                # with the ask on its very first tool call, ran `dim declare`
+                # with a real task and next action, and got back
+                #
+                #   OSError: [Errno 30] Read-only file system:
+                #   '/home/ak2tx/.dimissory'
+                #
+                # as a raw Python traceback -- because Codex runs agent tools
+                # in a sandbox where $HOME is read-only, while the HOOK runs
+                # outside it and writes there fine. The agent did everything
+                # right and got a stack trace. The letter came out DEGRADED
+                # and nothing anywhere said why.
+                #
+                # A traceback is not an error message: it describes our call
+                # stack instead of the reader's problem, and here the reader
+                # is a machine that will act on what it is told.
+                root = os.path.expanduser(args.journal or _J.default_root())
+                print(f"dim declare: cannot write the journal at {root}\n"
+                      f"  {e.strerror or e}\n"
+                      f"  Inside a sandbox $HOME is often read-only. Retry "
+                      f"with a path you can write:\n"
+                      f"    dim declare --journal ./.dimissory/journal "
+                      f"--session {session} ...\n"
+                      f"  or set DIMISSORY_HOME to a writable directory.",
+                      file=sys.stderr)
+                return 1
     if not wrote:
         print("dim declare: nothing to record. Pass at least one of "
               "--task/--next/--decided/--ruled-out/--constraint/--revoke",

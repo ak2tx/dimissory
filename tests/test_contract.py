@@ -204,6 +204,24 @@ def test_a_grok_session_directory_is_read_as_a_transcript():
     check("and its arguments are hashed",
           got and len(got[0][2]) == 16 and "calc.py" not in got[0][2], got)
 
+    # Codex rollouts: a THIRD shape, and the second silent zero. A real
+    # session made 15 calls and the letter said 0.
+    cx = os.path.join(d, "rollout.jsonl")
+    with open(cx, "w", encoding="utf-8") as fh:
+        fh.write(_json.dumps({"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "exec",
+            "input": 'const r = await tools.exec_command({cmd:"ls"})'}}) + "\n")
+        fh.write(_json.dumps({"type": "response_item", "payload": {
+            "type": "custom_tool_call_output", "output": []}}) + "\n")
+    got = recent_calls(cx)
+    check("a codex rollout yields its tool calls",
+          got is not None and len(got) == 1, got)
+    check("named from the payload", got and got[0][0] == "exec", got)
+    check("an output record is not counted as a second call",
+          got and len(got) == 1, got)
+    check("and the command is hashed, never carried",
+          got and len(got[0][2]) == 16 and "exec_command" not in got[0][2], got)
+
     check("a directory resolves to the history file",
           os.path.basename(resolve(session)) == "chat_history.jsonl",
           resolve(session))

@@ -205,8 +205,9 @@ def command_works(command=None, timeout=20):
 # cannot dilute the instruction.
 ASK = (
     "IMPORTANT: before you finish, you MUST run this command:\n"
-    "  {dim} declare --session {sid} --task \"<one line: what this session is "
-    "for>\" --next \"<one line: the exact next action>\"\n"
+    "  {dim} declare --journal {jroot} --session {sid} --task \"<one line: "
+    "what this session is for>\" --next \"<one line: the exact next "
+    "action>\"\n"
     "It records a handoff so work survives this session's plan window closing. "
     "Run it now, and run it again with an updated --next whenever the next "
     "action changes. You may also add --decided \"...\" or --ruled-out "
@@ -217,8 +218,9 @@ GATE = (
     "This session has recorded nothing for its handoff letter, so if the "
     "window closes now the letter will be empty of everything that matters. "
     "Before finishing, run:\n"
-    "  {dim} declare --session {sid} --task \"<what this session was for>\" "
-    "--next \"<the exact next action for whoever continues>\"\n"
+    "  {dim} declare --journal {jroot} --session {sid} --task \"<what this "
+    "session was for>\" --next \"<the exact next action for whoever "
+    "continues>\"\n"
     "Then finish normally."
 )
 
@@ -242,7 +244,7 @@ def _declared_anything(sid, root):
 
 
 def _seal_state_path(sid, journal_root):
-    root = os.path.expanduser(journal_root or "~/.dimissory/journal")
+    root = os.path.expanduser(journal_root or journal.default_root())
     return os.path.join(root, ".sealed", f"{sid[:60]}.json")
 
 
@@ -354,7 +356,10 @@ def _handle(payload, journal_root, letters_dir):
             return ""                # already declaring; do not nag every turn
         return json.dumps({"hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": ASK.format(sid=sid, dim=dim_command())}})
+            "additionalContext": ASK.format(
+                sid=sid, dim=dim_command(),
+                jroot=os.path.expanduser(
+                    journal_root or journal.default_root()))}})
 
     if event in ("stop", "subagentstop"):
         # Fire ONCE. `stopHookActive` is true when the agent is already
@@ -365,7 +370,11 @@ def _handle(payload, journal_root, letters_dir):
         if _declared_anything(sid, journal_root):
             return ""
         return json.dumps({"decision": "block",
-                           "reason": GATE.format(sid=sid, dim=dim_command())})
+                           "reason": GATE.format(
+                               sid=sid, dim=dim_command(),
+                               jroot=os.path.expanduser(
+                                   journal_root
+                                   or journal.default_root()))})
 
     # THE TRIGGER. A tool call is the only regular heartbeat a hook gets, so
     # this is where the window is checked. Sealing here means the letter is
@@ -489,7 +498,7 @@ def seal(sid, payload, journal_root=None, letters_dir=None):
         from .config import Config
         letters_dir = Config.load(None).letters_dir
     letters = os.path.expanduser(letters_dir)
-    jroot = os.path.expanduser(journal_root or "~/.dimissory/journal")
+    jroot = os.path.expanduser(journal_root or journal.default_root())
     ours = (letters, jroot)
 
     # The meter. This is what makes a letter possible BEFORE the wall rather

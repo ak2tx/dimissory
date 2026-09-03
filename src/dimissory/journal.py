@@ -65,8 +65,27 @@ class JournalError(ValueError):
     pass
 
 
+def default_root():
+    """Where the journal lives: DIMISSORY_HOME/journal, else ~/.dimissory/journal.
+
+    DIMISSORY_HOME exists because the two halves of this tool do not always run
+    in the same sandbox. Measured on Codex: the HOOK runs outside the sandbox
+    and writes ~/.dimissory happily, while the AGENT's own tool call runs
+    inside it, where $HOME is read-only. So the agent could not record what the
+    hook was waiting to read, and the letter came out DEGRADED with no
+    explanation anywhere.
+
+    One variable, honoured by both halves, is what lets an operator point them
+    at a directory the agent can actually write.
+    """
+    home = os.environ.get("DIMISSORY_HOME")
+    if home:
+        return os.path.join(os.path.expanduser(home), "journal")
+    return os.path.expanduser("~/.dimissory/journal")
+
+
 def _session_dir(session, root=None):
-    root = os.path.expanduser(root or "~/.dimissory/journal")
+    root = os.path.expanduser(root or default_root())
     safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(session))
     if not safe or safe.strip(".") == "":
         raise JournalError(f"unusable session name: {session!r}")
