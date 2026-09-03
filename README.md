@@ -10,12 +10,17 @@ out — the five-hour cap, the weekly cap, a session about to be compacted —
 `dimissory` writes a portable letter of transfer, so the next session continues
 the work instead of reconstructing it. On another account, or another model.
 
-> **Status: early, `0.0.1`, no PyPI release yet.** The brief format, the trust
-> contract, the verify mechanism, the agent hooks and the plan-window meter all
-> work and are tested — 501 checks across 10 files. What is *not* done is listed
-> under [What is built](#what-is-built), including the one gap that matters:
-> `codex exec` has no seal path. Claude needs `dim statusline --install` as a
-> second step, and `dim status` will tell you if you skipped it.
+```bash
+pip install dimissory
+```
+
+> **Status: early, `0.0.2`.** The brief format, the trust contract, the verify
+> mechanism, the agent hooks and the plan-window meter all work and are tested
+> — 540 checks across 10 files. What is *not* done is listed under
+> [What is built](#what-is-built), including the gap that matters most:
+> non-interactive runs have no meter on either vendor. Claude needs
+> `dim statusline --install` as a second step, and `dim status` will tell you
+> if you skipped it — it exits non-zero when nothing can seal.
 
 ---
 
