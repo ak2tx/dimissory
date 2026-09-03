@@ -363,12 +363,136 @@ def cmd_config(args):
     return 0
 
 
+def _when(epoch):
+    """A reset time a person can act on.
+
+    "%H:%M" alone said `resets 02:00` for a weekly window three days out,
+    which reads as two o'clock tonight. A time of day is only unambiguous
+    within today, so the day is named whenever it is not today -- the same
+    reasoning render.py already records about printing a bare epoch: correct
+    and useless is still useless.
+    """
+    import time as _t
+    try:
+        when = _t.localtime(float(epoch))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "unknown"
+    today = _t.localtime()
+    if when[:3] == today[:3]:
+        return _t.strftime("%H:%M", when)
+    days = (_t.mktime(when[:3] + (0, 0, 0, 0, 0, -1))
+            - _t.mktime(today[:3] + (0, 0, 0, 0, 0, -1))) / 86400.0
+    if 0 < days < 2:
+        return _t.strftime("tomorrow %H:%M", when)
+    if 0 < days < 7:
+        return _t.strftime("%a %H:%M", when)
+    return _t.strftime("%d %b %H:%M", when)
+
+
+def cmd_statusline_cmd(args):
+    """`dim statusline` and `dim statusline --install`.
+
+    Two very different jobs behind one name, because the name is the thing a
+    person has to type into their settings and it should match the docs they
+    are reading. Without --install this is run BY Claude Code, on stdin.
+    """
+    if args.install:
+        from . import install as I
+        try:
+            path, note = I.install_statusline(assume_yes=args.yes)
+        except I.InstallRefused as e:
+            print(f"  {e}", file=sys.stderr)
+            return 1
+        if not path:
+            print("nothing was installed", file=sys.stderr)
+            return 1
+        print("\nrestart Claude Code for it to read the new configuration")
+        print("then check it with: dim status")
+        return 0
+    return cmd_statusline(args)
+
+
+def cmd_statusline(args):
+    """`dim statusline` -- Claude Code's meter, recorded as it goes past."""
+    from . import statusline
+    argv = []
+    if args.wrap:
+        argv += ["--wrap", args.wrap]
+    if getattr(args, "cache", None):
+        argv += ["--cache", args.cache]
+    return statusline.main(argv)
+
+
 def cmd_status(args):
-    # The plan-window meter is the piece that makes writing a letter BEFORE
-    # lockout possible at all, and it is the next thing to port.
-    print("plan-window meter not wired up yet -- see docs/contract.md",
-          file=sys.stderr)
-    return 1
+    """`dim status` -- what the meter can see, per agent, and what it cannot.
+
+    This printed "plan-window meter not wired up yet" long after the meter
+    worked, which made it the most misleading command in the tool: it is the
+    first thing a person runs, and it told them the central feature was
+    missing. Review called it a lie about the very fixes it was shipped
+    alongside.
+    """
+    from . import install as I
+    from . import window as W
+    cfg = Config.load(getattr(args, "config", None))
+    if getattr(cfg, "problem", None):
+        print(f"config UNREADABLE: {cfg.problem}", file=sys.stderr)
+        print("running on defaults -- your file is NOT in effect",
+              file=sys.stderr)
+
+    detected = I.detect()
+    at = cfg.get("window", "write_at")
+    at = float(at) if isinstance(at, (int, float)) else 0.85
+    print(f"seal at        {at * 100:.0f}% of a plan window")
+    print(f"letters        {cfg.letters_dir}")
+    print()
+
+    rows, any_meter = [], False
+    for key in ("claude", "codex", "grok"):
+        installed = "-"
+        try:
+            _e, _m, added = I.plan(key, "dim hook", None)
+            installed = "no" if added else "yes"
+        except I.InstallRefused:
+            installed = "refused"
+        except (OSError, KeyError):
+            installed = "?"
+
+        win = None
+        if key == "claude":
+            win = W._claude(getattr(args, "window_cache", None))
+        elif key == "grok":
+            win = W._grok()
+        # Codex is per-session: its reading lives in whichever rollout is
+        # current, so there is nothing account-wide to show here. Saying that
+        # is better than printing a blank that reads as "no budget known".
+        if win is not None and win.is_stale:
+            meter = f"stale ({int(win.age)}s old)" if win.age else "stale"
+        elif win is not None:
+            any_meter = True
+            meter = f"{win.used_percent:.0f}% of {win.label()}"
+            if win.resets_at:
+                meter += f", resets {_when(win.resets_at)}"
+        elif key == "codex":
+            meter = "per-session (read from the current rollout)"
+        elif key == "claude":
+            meter = "none -- run `dim statusline --install`"
+        else:
+            meter = "none recorded"
+        rows.append((key, "yes" if detected.get(key) else "no",
+                     installed, meter))
+
+    print(f"{'agent':8} {'on PATH':8} {'hooks':8} meter")
+    for key, path, installed, meter in rows:
+        print(f"{key:8} {path:8} {installed:8} {meter}")
+    print()
+    if not any_meter:
+        # An honest zero. This is the state where nothing seals before the
+        # wall, and it must not be reported as readiness.
+        print("no live meter, so nothing will seal before a window closes.",
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv=None):
@@ -390,7 +514,12 @@ def main(argv=None):
     r = sub.add_parser("resume", help="verify a letter still holds")
     r.add_argument("path", nargs="?"); r.set_defaults(fn=cmd_resume)
 
-    sub.add_parser("status", help="plan-window usage").set_defaults(fn=cmd_status)
+    st = sub.add_parser("status",
+                        help="what the meter can see, per agent, and what it "
+                             "cannot")
+    st.add_argument("--window-cache", dest="window_cache", default=None,
+                    help="where the statusline recorded Claude's window")
+    st.set_defaults(fn=cmd_status)
 
     dc = sub.add_parser("declare", help="record what you know, as you work")
     dc.add_argument("--session")
@@ -416,6 +545,20 @@ def main(argv=None):
                     help="print the config that would be installed")
     hk.add_argument("--yes", action="store_true", help="do not ask")
     hk.set_defaults(fn=cmd_hook)
+
+    sl = sub.add_parser("statusline",
+                        help="Claude Code's plan-window meter (run BY Claude "
+                             "Code, not by you)")
+    sl.add_argument("--install", action="store_true",
+                    help="add this as Claude Code's statusLine, wrapping any "
+                         "command already there")
+    sl.add_argument("--wrap", default=None,
+                    help="run this command and print ITS output, after "
+                         "recording the window")
+    sl.add_argument("--cache", default=None,
+                    help="where to record the reading")
+    sl.add_argument("--yes", action="store_true", help="do not ask")
+    sl.set_defaults(fn=cmd_statusline_cmd)
 
     su = sub.add_parser("setup", help="guided first-time setup")
     su.add_argument("--yes", action="store_true", help="take every default")

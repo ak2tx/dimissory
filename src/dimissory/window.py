@@ -29,18 +29,30 @@ WHERE THE NUMBER COMES FROM, measured per provider rather than assumed:
           when the limit has ALREADY been hit.
 
           So it is a tombstone, not a meter: it tells you the wall was hit and
-          when the window reopens, which is worth putting in a letter, and it
-          cannot tell you that you are at 85%. `_claude_wall` reads it for the
-          reset time; `read` still returns no Window for Claude, because there
-          is no percentage to return.
+          when the window reopens. `_claude_wall` reads it, and it is what
+          Claude had INSTEAD of a meter until the statusline was wired up.
 
-The five_hour/seven_day UTILIZATION pair is emitted only in a stream-json
-rate_limit event, never written to the transcript -- the predecessor needed a
-supervising process wrapping the CLI to catch it in flight. So Claude has no
-before-the-wall meter, and that is reported as UNMEASURED rather than
-estimated. Token consumption IS on disk, but consumption without a
-denominator is telemetry, not a fraction of a window, and turning it into a
-percentage would be inventing the number this whole project exists not to
+          THE METER ITSELF ARRIVES BY STATUSLINE. Claude Code hands the
+          five_hour/seven_day pair to the statusline command on stdin every
+          turn -- a real percentage on a 0-100 scale with a real reset time.
+          Measured live on 2.1.248: five_hour 100%, seven_day 58%. `dim
+          statusline` records it and `_claude` reads it back, so Claude now
+          has a before-the-wall meter like the other two.
+
+          Note this is NOT a supervising process. The predecessor wrapped the
+          CLI in a PTY to scrape the same pair off the wire; here Claude Code
+          calls us, through an interface it already invokes on its own
+          schedule, and we never sit between it and its terminal.
+
+          It costs one thing: the statusline has to be installed. Without it
+          nothing records, `_claude` finds no file, and Claude falls back to
+          the tombstone -- at the wall rather than before it. That is a real
+          precondition and `dim status` reports it rather than assuming it.
+
+What is still refused everywhere: turning token consumption into a
+percentage. Consumption IS on disk for every provider, but consumption
+without a denominator is telemetry, not a fraction of a window, and
+converting it would invent the number this whole project exists not to
 invent.
 
 STALENESS. A reading whose age cannot be established, or which is older than
@@ -84,7 +96,7 @@ class Window:
     """
 
     __slots__ = ("used_percent", "window_minutes", "resets_at", "source",
-                 "observed_at", "plan", "also")
+                 "observed_at", "plan", "also", "fixed_label")
 
     def __init__(self, used_percent, window_minutes=None, resets_at=None,
                  source="", observed_at=None, plan=None):
@@ -95,6 +107,9 @@ class Window:
         self.observed_at = observed_at
         self.plan = plan
         self.also = []          # the other windows on the same account
+        # Set when the provider names its own window ("claude 5h") rather than
+        # giving a length in minutes to derive one from.
+        self.fixed_label = None
 
     @property
     def age(self):
@@ -111,6 +126,8 @@ class Window:
         return a > MAX_AGE or a < -MAX_SKEW
 
     def label(self):
+        if self.fixed_label:
+            return self.fixed_label
         m = self.window_minutes
         if not m:
             return self.source
@@ -309,6 +326,60 @@ def _grok(root=None):
     return Window(pct, source="grok", observed_at=_epoch(d.get("ts")))
 
 
+def _claude(cache_root=None):
+    """Claude's plan window, from whatever the statusline last wrote down.
+
+    Claude Code never puts this on disk itself -- but it HANDS it to the
+    statusline command on stdin every turn, and `dim statusline` writes it
+    where this can find it. Measured live on 2.1.248: five_hour 100%,
+    seven_day 58%, both with real reset times. See statusline.py.
+
+    So the earlier verdict in this module -- Claude can only be sealed AFTER
+    the wall -- held only while nothing was recording. It is a real
+    before-the-wall meter now, and it required no supervising process: the
+    predecessor wrapped the CLI in a PTY to scrape this same pair off the
+    wire, where this is a documented callback Claude Code already invokes.
+
+    A window whose `resets_at` has PASSED is dropped rather than reported.
+    Claude Code does the same thing upstream, and for the same reason: once
+    the window turns over, the percentage measured inside it describes usage
+    that no longer counts against anything.
+    """
+    path = os.path.expanduser(cache_root or "~/.dimissory/window/claude.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            blob = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(blob, dict):
+        return None
+    at = blob.get("observed_at")
+    at = float(at) if isinstance(at, (int, float)) else None
+    now = time.time()
+    live = []
+    for w in blob.get("windows") or []:
+        if not isinstance(w, dict):
+            continue
+        pct = w.get("used_percent")
+        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+            continue
+        resets = w.get("resets_at")
+        if isinstance(resets, (int, float)) and resets <= now:
+            continue                  # this window has already turned over
+        live.append((float(pct), w.get("label") or "claude", resets))
+    if not live:
+        return None
+    live.sort(reverse=True)           # binding window first
+    pct, label, resets = live[0]
+    win = Window(pct, None, resets, source="claude", observed_at=at)
+    win.fixed_label = label
+    for p, lb, r in live[1:]:
+        other = Window(p, None, r, source="claude", observed_at=at)
+        other.fixed_label = lb
+        win.also.append(other)
+    return win
+
+
 def _claude_wall(transcript):
     """Claude's quota tombstone: the wall was hit, and when it reopens.
 
@@ -407,7 +478,7 @@ def provider_for(transcript):
     return None
 
 
-def read(transcript=None, provider=None, grok_root=None):
+def read(transcript=None, provider=None, grok_root=None, claude_root=None):
     """The current plan window, or None when it cannot be established.
 
     None, not a zero and not an estimate. Every caller renders an absent
@@ -419,14 +490,17 @@ def read(transcript=None, provider=None, grok_root=None):
     so a Claude session reports no window rather than borrowing one.
     """
     known = provider or provider_for(transcript)
-    if known == "claude":
-        # No percentage exists on disk for Claude. See the module docstring.
-        return None
     candidates = []
-    if known in (None, "codex"):
-        candidates.append(_codex(transcript))
-    if known in (None, "grok"):
-        candidates.append(_grok(grok_root))
+    if known == "claude":
+        # Only what the statusline recorded. Never Grok's account-wide figure,
+        # which is how a Claude session used to end up reporting another
+        # product's meter as its own.
+        candidates.append(_claude(claude_root))
+    else:
+        if known in (None, "codex"):
+            candidates.append(_codex(transcript))
+        if known in (None, "grok"):
+            candidates.append(_grok(grok_root))
     for w in candidates:
         if w is not None and not w.is_stale:
             return w

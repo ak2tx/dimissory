@@ -158,7 +158,13 @@ def _sandbox(d):
     file -- the same act install.py's docstring records the predecessor
     committing while testing the fix for having committed it once already.
     """
-    return {k: os.path.join(d, f"{k}-hooks.json") for k in I.TARGETS}
+    paths = {k: os.path.join(d, f"{k}-hooks.json") for k in I.TARGETS}
+    # The statusline is a SEPARATE install with its own target, so the sandbox
+    # has to name it too. Covering only I.TARGETS left setup free to write a
+    # statusLine into the real settings.json -- the same escape as before, one
+    # feature later.
+    paths["claude_statusline"] = os.path.join(d, "claude-statusline.json")
+    return paths
 
 
 def test_setup_is_safe_to_rerun_and_never_blocks():

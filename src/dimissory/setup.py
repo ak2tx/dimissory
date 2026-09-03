@@ -185,6 +185,29 @@ def run(config_path=None, assume_yes=None, out=print, hook_paths=None):
     else:
         steps.append(("hooks", "no agent CLIs found, nothing to install"))
 
+    # 4b. Claude's meter, which is a SEPARATE install from the hooks.
+    #
+    # Hooks alone give Claude nothing to seal on: Claude Code writes no
+    # utilization percentage to disk anywhere, so `should_seal` has no number
+    # and the letter only ever arrives at the wall. The statusline is where
+    # that percentage is handed over, so on Claude this step is the difference
+    # between the product's actual claim and a consolation prize -- and
+    # guided setup would be repeating its own documented sin to leave it out.
+    if found.get("claude") and cfg.values.get("agents", {}).get("claude", True):
+        out("")
+        try:
+            sl_path, note = I.install_statusline(
+                path=(hook_paths or {}).get("claude_statusline"),
+                assume_yes=assume_yes, out=out)
+        except I.InstallRefused as e:
+            out(f"    {e}")
+            sl_path, note = None, "refused"
+        if sl_path and note != "declined":
+            steps.append(("meter", f"claude: {note}"))
+        else:
+            steps.append(("meter", "claude: NOT installed -- Claude will only "
+                                   "get a letter AT the wall, not before it"))
+
     # 5. Prove it works, rather than asserting it does.
     out("")
     if _ask("  write one letter now, to prove the whole path works?",

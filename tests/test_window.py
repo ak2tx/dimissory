@@ -11,20 +11,23 @@ Where the number comes from was measured per provider, not assumed:
             rate_limits object with BOTH caps: primary (5h) and secondary
             (weekly). Measured across 332 real rollouts on a live account.
     Grok    ~/.grok/logs/unified.jsonl, creditUsagePercent, account-wide.
-    Claude  NO PERCENTAGE ON DISK. Transcripts do carry a structural
-            quotaLimits object, but it is written only once the limit has
-            been hit and holds no utilization figure -- a tombstone, not a
-            meter. The utilization pair exists only in a live stream event.
+    Claude  NOTHING ON DISK BY DEFAULT, and a real meter once `dim
+            statusline` is installed -- Claude Code hands the five_hour /
+            seven_day pair to the statusline command on stdin every turn.
+            Transcripts also carry a `quotaLimits` object, but it is written
+            only once a limit has been hit and holds no percentage: a
+            tombstone, which is what Claude had instead of a meter until the
+            statusline was wired up. See test_statusline.py.
 
-That last one is a limitation this suite pins down rather than papers over,
-because the tempting fix -- deriving a percentage from token consumption,
-which IS on disk -- would invent the number the whole project exists not to
-invent.
+What is refused everywhere is deriving a percentage from token consumption,
+which IS on disk for every provider: consumption without a denominator is
+telemetry, not a fraction of a window.
 
-Three of the checks here exist because review round 1 found the meter wrong
-in ways this file had asserted were right: it read only the 5h window when
-the weekly one is routinely closer to full, it took a placeholder 0.0 as a
-measured zero, and it treated a future timestamp as fresh.
+Several checks here exist because review found the meter wrong in ways this
+file had asserted were right -- it read only the 5h window when the weekly
+one is routinely closer to full, took a placeholder 0.0 as a measured zero,
+and treated a future timestamp as fresh -- and one exists because this file's
+claim about Claude has now been wrong twice in opposite directions.
 
 Run: python3 tests/test_window.py
 """
@@ -220,8 +223,9 @@ def test_a_claude_session_never_borrows_another_products_meter():
           W.provider_for("/home/u/.codex/sessions/2026/rollout-x.jsonl")
           == "codex")
     check("an unknown path stays unknown", W.provider_for("/tmp/x.jsonl") is None)
-    check("read() returns nothing for a claude session, even with a grok log",
-          W.read(transcript="/home/u/.claude/projects/x/a.jsonl") is None)
+    check("a claude session with no recording gets NOTHING, not grok's figure",
+          W.read(transcript="/home/u/.claude/projects/x/a.jsonl",
+                 claude_root=_no_claude_cache()) is None)
     w = W.Window(50.0, 300, source="codex", observed_at=time.time())
     check("and every window carries its source",
           w.as_dict().get("source") == "codex", w.as_dict())
@@ -286,27 +290,48 @@ def test_no_reading_is_not_the_same_as_plenty_of_room():
           W.should_seal(W.Window(85.0, observed_at=time.time()), 0.85) is True)
 
 
-def test_claude_has_no_on_disk_PERCENTAGE_and_says_so_precisely():
-    """The temptation is to derive a percentage from token consumption, which
-    IS on disk. That is telemetry with no denominator, and turning it into a
-    fraction of a window would be inventing the number.
+def _no_claude_cache():
+    """A claude cache path that definitely holds nothing.
 
-    The earlier version of this test pinned the phrase "NOT AVAILABLE ON DISK",
-    which turned out to be too strong: Claude transcripts DO carry a
-    structural quotaLimits object. It has no percentage in it, so the
-    conclusion held, but the stated reason was wrong -- and a wrong reason in
-    a comment is what stops the next person finding the real data.
+    Passed EXPLICITLY by every test below, because the default is
+    ~/.dimissory/window/claude.json -- the developer's own live reading. Three
+    checks here started failing the moment this machine had one, which is the
+    correct outcome for the product and an isolation bug in the test: a test
+    whose result depends on the author's home is not measuring the code.
     """
-    check("read() still offers no claude provider, because there is no number",
-          W.read(transcript="/nonexistent", provider="claude") is None)
+    return os.path.join(tempfile.mkdtemp(prefix="dim-noclaude-"), "none.json")
+
+
+def test_claude_has_no_percentage_UNTIL_THE_STATUSLINE_RECORDS_ONE():
+    """This test has now been wrong twice, in opposite directions.
+
+    First it pinned "NOT AVAILABLE ON DISK", which was too strong: Claude
+    transcripts do carry a structural quotaLimits object (with no percentage
+    in it). Corrected to say the PERCENTAGE was what was missing.
+
+    That is still not the whole truth. Claude Code hands the five_hour /
+    seven_day pair to the STATUSLINE on stdin every turn, so the percentage is
+    obtainable -- it simply is not written down until something writes it
+    down. Nothing is on disk by default; `dim statusline` is what puts it
+    there. See statusline.py and test_statusline.py.
+
+    What survives unchanged is the refusal underneath: token consumption IS on
+    disk and is still never turned into a percentage, because consumption
+    without a denominator is telemetry, not a fraction of a window.
+    """
+    check("with nothing recorded, there is no claude window",
+          W.read(transcript="/nonexistent", provider="claude",
+                 claude_root=_no_claude_cache()) is None)
     src = open(os.path.join(ROOT, "src", "dimissory", "window.py")).read()
     flat = " ".join(src.split())
-    check("the module says what is actually missing: the percentage",
-          "NO UTILIZATION PERCENTAGE ON DISK" in src)
-    check("and does not claim the whole object is absent",
+    check("the module no longer claims the object is absent",
           "NOT AVAILABLE ON DISK" not in src)
-    check("naming consumption as the trap",
+    check("it names the statusline as where the meter comes from",
+          "STATUSLINE" in src.upper() and "_claude" in src)
+    check("and still names consumption as the trap",
           "consumption without a denominator" in flat)
+    check("and says plainly that the statusline must be installed",
+          "has to be installed" in flat, "precondition not recorded")
 
 
 def test_claudes_quota_tombstone_is_read_but_never_used_as_a_meter():
@@ -330,8 +355,9 @@ def test_claudes_quota_tombstone_is_read_but_never_used_as_a_meter():
     check("it is NOT a Window object", not isinstance(wall, W.Window))
     check("it carries no percentage to be mistaken for one",
           wall and not any("percent" in k for k in wall), wall)
-    check("and read() still returns nothing for claude",
-          W.read(transcript=p, provider="claude") is None)
+    check("and with nothing recorded, read() still yields no claude window",
+          W.read(transcript=p, provider="claude",
+                 claude_root=_no_claude_cache()) is None)
     check("no tombstone means None", W._claude_wall(
         os.path.join(d, "absent.jsonl")) is None)
 
@@ -374,7 +400,7 @@ def main():
               test_a_stale_reading_is_refused_not_returned,
               test_an_undateable_reading_is_refused,
               test_no_reading_is_not_the_same_as_plenty_of_room,
-              test_claude_has_no_on_disk_PERCENTAGE_and_says_so_precisely,
+              test_claude_has_no_percentage_UNTIL_THE_STATUSLINE_RECORDS_ONE,
               test_claudes_quota_tombstone_is_read_but_never_used_as_a_meter,
               test_a_missing_or_unreadable_transcript_is_none_not_an_error,
               test_grok_reads_its_own_billing_log):

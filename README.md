@@ -106,29 +106,50 @@ deliberately no exit code meaning "probably fine".
 | Transcript reading — bounded tail, hashed args | working |
 | Agent hooks — install, ask, gate | working, all three CLIs |
 | Plan-window meter — Codex, Grok | working, both caps |
+| Plan-window meter — Claude | working, via `dim statusline` |
 | Seal before the wall, on the tool-call heartbeat | working |
-| Plan-window meter — Claude | **at the wall only**, see below |
+| `dim status` | working |
 | Observed block — last command and exit code | not yet |
-| `dim status` | not yet, prints a stub |
 | Pruning old letters (`letters.keep`) | not yet, setting is inert |
+| `codex exec` (non-interactive) | no seal path, see below |
 | Cross-account delivery | not yet |
 
-### The one that matters: Claude has no meter
+### Claude needs one extra step, and it is not optional
 
-For Codex and Grok, dimissory reads the plan window off disk and seals a
-letter at 85% — before the wall, which is the whole claim.
+Codex and Grok write their plan window to disk, so dimissory just reads it.
+**Claude Code writes it nowhere** — but it hands the numbers to your
+statusline command on stdin every turn:
 
-**On Claude Code it cannot.** No utilization percentage is written to disk
-anywhere. Transcripts carry a `quotaLimits` object, but it is written only
-once a limit has already been hit and contains no percentage — measured
-across 81 records on a live machine, every one `status: "rejected"`. So on
-Claude, dimissory seals the moment the wall is hit and tells you when the
-window reopens. That is useful and it is *not* the product's central claim.
-Deriving a percentage from token consumption would invent the denominator
-this project exists not to invent.
+```json
+"rate_limits": {
+  "five_hour": {"used_percentage": 100, "resets_at": 1788416400},
+  "seven_day": {"used_percentage": 58,  "resets_at": 1788764400}
+}
+```
 
-The likely fix is Claude's statusline, which receives a real
-`rate_limits.five_hour.used_percentage` every turn. Not built yet.
+So `dim statusline` records them, and the hook reads them back:
+
+```
+dim statusline --install     # wraps any statusline you already have
+dim status                   # says what the meter can see, per agent
+```
+
+Without it, Claude has no percentage to seal on and you only get a letter
+*at* the wall — dimissory reads the `quotaLimits` tombstone from the
+transcript for that, which carries the reset time but no percentage
+(measured: 81 records on a live machine, every one `status: "rejected"`).
+`dim status` exits non-zero when no meter is live, precisely so this cannot
+be mistaken for readiness.
+
+This is **not** a supervising process. Nothing wraps the `claude` binary and
+nothing parses its output; Claude Code calls `dim statusline` itself, through
+an interface it already invokes on its own schedule.
+
+### Known gaps, stated plainly
+
+`codex exec` fires `UserPromptSubmit` but not `PostToolUse`, so
+non-interactive Codex runs have no seal path at all. Interactive Codex is
+fine.
 
 ### The gate is a request, not a guarantee
 

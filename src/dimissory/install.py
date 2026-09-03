@@ -82,6 +82,12 @@ WINDOW_EVENT = "PostToolUse"
 # second, and every re-install would append another copy of a hook that was
 # already there -- silently, since duplicates still fire.
 MARKERS = ("dim hook", "dimissory hook", "dimissory.cli hook")
+
+# How we recognise our own statusline entry. Distinct from the hook
+# markers because a statusline that WRAPS someone else's contains both
+# their command and ours, and confusing the two would either refuse to
+# install or wrap ourselves recursively on the next run.
+STATUSLINE_MARKER = "statusline"
 MARKER = MARKERS[0]                          # kept: callers and tests use it
 
 
@@ -217,6 +223,104 @@ def plan(target, command, path=None):
         added.append(event)
     merged[spec["root_key"]] = new_hooks
     return existing, merged, added
+
+
+def plan_statusline(command, path=None):
+    """What installing the statusline would do. Returns (existing, merged, note).
+
+    Claude Code's `statusLine` is a single command, not a list, so unlike the
+    hooks there is no merging: installing here REPLACES whatever is set. That
+    would silently cost somebody the status bar they built, so an existing
+    command is WRAPPED -- ours records the window, then runs theirs and prints
+    its output verbatim.
+
+    Note the asymmetry with hooks and why it is not an oversight: a host that
+    supports many hooks per event lets us add one alongside. A single-valued
+    setting does not, so the only honest options are to wrap or to refuse.
+    """
+    p = os.path.expanduser(path or TARGETS["claude"]["path"])
+    existing = {}
+    if os.path.exists(p):
+        try:
+            with open(p, "rb") as fh:
+                raw = fh.read()
+            existing = json.loads(raw.decode("utf-8")) if raw.strip() else {}
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            raise InstallRefused(
+                f"{p} could not be read as JSON ({e}). Refusing to touch it. "
+                f"Nothing was changed.")
+        if not isinstance(existing, dict):
+            raise InstallRefused(
+                f"{p} is a {type(existing).__name__}, not an object. Refusing "
+                f"to rewrite it. Nothing was changed.")
+
+    current = existing.get("statusLine")
+    theirs = None
+    if isinstance(current, dict):
+        if STATUSLINE_MARKER in json.dumps(current):
+            return existing, dict(existing), "already installed"
+        theirs = current.get("command")
+    elif isinstance(current, str) and current:
+        theirs = current                      # the older string form
+        if STATUSLINE_MARKER in current:
+            return existing, dict(existing), "already installed"
+
+    if theirs:
+        # Quote it as one argument: `--wrap` takes a single command string and
+        # splits it itself, so an unquoted path with a space in it would
+        # arrive as two arguments and their statusline would never run.
+        import shlex
+        full = f"{command} --wrap {shlex.quote(str(theirs))}"
+        note = f"wrapping the existing statusline: {theirs}"
+    else:
+        full = command
+        note = "no statusline was set"
+
+    merged = dict(existing)
+    merged["statusLine"] = {"type": "command", "command": full}
+    return existing, merged, note
+
+
+def install_statusline(command=None, path=None, assume_yes=False,
+                       out=print, ask=None):
+    """Install `dim statusline` as Claude Code's statusLine. (path, note)."""
+    if command is None:
+        from .hook import dim_command
+        command = f"{dim_command()} statusline"
+    p = os.path.expanduser(path or TARGETS["claude"]["path"])
+    existing, merged, note = plan_statusline(command, p)
+    if note == "already installed":
+        out(f"  Claude Code statusline: already installed at {p}")
+        return p, note
+
+    out(f"  Claude Code statusline: about to edit {p}")
+    out(f"    this is what gives Claude a plan-window meter at all;")
+    out(f"    Claude Code writes the percentage nowhere else.")
+    out(f"    command:  {merged['statusLine']['command']}")
+    out(f"    {note}")
+    kept = sorted(k for k in existing if k != "statusLine")
+    out(f"    keys left as-is: {', '.join(kept) if kept else '(none)'}")
+
+    before = _fingerprint(p)
+    if not assume_yes:
+        answer = (ask or input)("    proceed? [y/N] ")
+        if not str(answer).strip().lower().startswith("y"):
+            out("    declined; nothing was changed")
+            return None, "declined"
+    if _fingerprint(p) != before:
+        raise InstallRefused(
+            f"{p} changed while waiting for an answer. Nothing was written -- "
+            f"run this again to plan against the current file.")
+
+    backup = _backup(p)
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    tmp = p + ".dim-tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(merged, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, p)
+    out(f"    wrote {p}" + (f" (previous kept at {backup})" if backup else ""))
+    return p, note
 
 
 def install(target, command=None, path=None, assume_yes=False,
