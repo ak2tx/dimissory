@@ -23,6 +23,12 @@ DEFAULTS = {
         # How long to wait for the agent's half before writing without it. A
         # degraded letter beats no letter, and it is labelled either way.
         "grace": "5m",
+        # Crossing the margin is not a one-off event: the window stays past it
+        # for the rest of the session. Without an interval, every tool call
+        # after the crossing seals another letter and shells out to git to do
+        # it. Long enough to be quiet, short enough that the letter still
+        # describes the session you are actually in.
+        "reseal_after": "10m",
     },
     "letters": {
         "dir": "~/.dimissory/letters",
@@ -51,6 +57,10 @@ write_at = {write_at}
 # A letter without it is marked DEGRADED rather than looking finished.
 grace = "{grace}"
 
+# Once past write_at the window stays past it, so the letter is refreshed on
+# this interval rather than on every tool call.
+reseal_after = "{reseal_after}"
+
 [letters]
 # Where letters are written.
 dir = "{dir}"
@@ -64,6 +74,29 @@ claude = {claude}
 codex = {codex}
 grok = {grok}
 '''
+
+
+def seconds(value, default=None):
+    """A duration like "10m" or "90s" as seconds, or `default`.
+
+    Never a guess. An unparseable duration returns the default rather than 0,
+    because 0 here means "reseal on every single tool call" -- the setting
+    silently inverting into the bug it exists to prevent.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value) if value >= 0 else default
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    unit = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}.get(text[-1])
+    number = text[:-1] if unit else text
+    try:
+        n = float(number)
+    except ValueError:
+        return default
+    return n * (unit or 1.0) if n >= 0 else default
 
 
 def _toml_str(value):
@@ -110,7 +143,14 @@ class Config:
         Running on defaults while the operator believes their file is in effect
         is the failure this project's predecessor kept a file about.
         """
-        path = os.path.expanduser(path or DEFAULT_PATH)
+        # DIMISSORY_CONFIG exists so a caller can be pointed at a specific
+        # file. The hook loads config with no argument from deep inside an
+        # event handler, so without this there is no way to exercise a setting
+        # except by writing to the operator's real home -- and a test that
+        # depends on the developer's own config is a test whose result is not
+        # about the code.
+        path = os.path.expanduser(path or os.environ.get("DIMISSORY_CONFIG")
+                                  or DEFAULT_PATH)
         values = {k: dict(v) for k, v in DEFAULTS.items()}
         sources, problem = {}, None
         if os.path.exists(path):

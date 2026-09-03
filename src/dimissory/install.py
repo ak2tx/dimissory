@@ -34,29 +34,45 @@ import time
 # Which events each host actually honours. Measured per CLI -- see hook.py.
 # Codex has no bare turn-end Stop in its event registry, so asking for one
 # there would install a hook that never fires and quietly does nothing.
+#
+# PostToolUse IS THE ONE THAT MATTERS and it was missing from all three. The
+# window check -- the whole "seal before the wall" claim -- lives on that event
+# in hook.py, and with no target registering it the check was unreachable in
+# every real installation. It measured green only because the test handed
+# `handle()` a PostToolUse payload directly, which bypasses the installer, and
+# the installer is the only thing that decides whether the event ever arrives.
+# Found by external review, not by this suite. A tool call is also the only
+# regular heartbeat a hook gets, so there is nowhere else for it to live.
 TARGETS = {
     "claude": {
         "label": "Claude Code",
         "path": "~/.claude/settings.json",
-        "events": ("SessionStart", "Stop", "PreCompact", "SessionEnd"),
+        "events": ("SessionStart", "PostToolUse", "Stop", "PreCompact",
+                   "SessionEnd"),
         "root_key": "hooks",
         "detect": ("claude",),
     },
     "codex": {
         "label": "Codex CLI",
         "path": "~/.codex/hooks.json",
-        "events": ("SessionStart", "PreCompact", "SessionEnd"),
+        "events": ("SessionStart", "PostToolUse", "PreCompact", "SessionEnd"),
         "root_key": "hooks",
         "detect": ("codex",),
     },
     "grok": {
         "label": "Grok CLI",
         "path": "~/.grok/hooks/dimissory.json",
-        "events": ("SessionStart", "Stop", "PreCompact", "SessionEnd"),
+        "events": ("SessionStart", "PostToolUse", "Stop", "PreCompact",
+                   "SessionEnd"),
         "root_key": "hooks",
         "detect": ("grok",),
     },
 }
+
+# The event the window check lives on. Named here so a test can assert every
+# target registers it, rather than trusting three tuples to stay in agreement
+# with a branch in another file.
+WINDOW_EVENT = "PostToolUse"
 
 # How we recognise our own entry on a re-install. This is a TUPLE because the
 # command is resolved per environment, and the forms it takes do not share one

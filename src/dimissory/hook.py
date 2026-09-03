@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 from . import journal
 from .brief import Brief
@@ -182,6 +183,52 @@ def _declared_anything(sid, root):
     return bool(values)
 
 
+def _seal_state_path(sid, journal_root):
+    root = os.path.expanduser(journal_root or "~/.dimissory/journal")
+    return os.path.join(root, ".sealed", f"{sid[:60]}.json")
+
+
+def _sealed_recently(sid, journal_root, win, reseal_after):
+    """Whether a letter for THIS window was already sealed, recently enough.
+
+    Without this the trigger is not a trigger, it is a loop. Crossing the
+    margin is not an event that happens once: the window stays past it for the
+    rest of the session, so every following tool call would seal another
+    letter -- each one shelling out to git to do it. One letter per tool call,
+    for hours.
+
+    Keyed on the window's reset time, so a genuinely NEW window seals again
+    rather than being suppressed by a marker left over from the old one. That
+    distinction is the reason this is not just a timestamp.
+    """
+    try:
+        with open(_seal_state_path(sid, journal_root), encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(state, dict):
+        return False
+    if state.get("resets_at") != (win.resets_at if win else None):
+        return False                  # different window; the old letter is not about it
+    at = state.get("at")
+    if not isinstance(at, (int, float)):
+        return False                  # no usable stamp is not "sealed just now"
+    return 0 <= (time.time() - at) < reseal_after
+
+
+def _record_seal(sid, journal_root, win):
+    path = _seal_state_path(sid, journal_root)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"resets_at": win.resets_at if win else None,
+                       "at": time.time()}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass          # a lost marker costs a duplicate letter, not the session
+
+
 def _handle(payload, journal_root, letters_dir):
     event = normalise_event(field(payload, "event"))
     sid = field(payload, "session")
@@ -212,13 +259,20 @@ def _handle(payload, journal_root, letters_dir):
     # and the difference from every tool that reacts to a 429.
     if event in ("posttooluse", "posttoolusefailure"):
         from . import window as _W
-        from .config import Config
+        from .config import Config, seconds
         cfg = Config.load(None)
         win = _W.read(transcript=field(payload, "transcript"))
         due = _W.should_seal(win, float(cfg.get("window", "write_at") or 0.85))
         if due:
+            # Seal once per window, then refresh at an interval. A letter
+            # written at 85% and never touched again is describing a session
+            # that has since run to 99%.
+            reseal = seconds(cfg.get("window", "reseal_after"), 600.0)
+            if _sealed_recently(sid, journal_root, win, reseal):
+                return ""
             path = seal(sid, payload, journal_root, letters_dir)
             if path:
+                _record_seal(sid, journal_root, win)
                 return json.dumps({"hookSpecificOutput": {
                     "hookEventName": "PostToolUse",
                     "additionalContext":
