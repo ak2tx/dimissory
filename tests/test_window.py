@@ -197,6 +197,97 @@ def test_a_placeholder_zero_does_not_erase_a_real_reading():
           w4 and w4.also and w4.also[0].used_percent == 0.0, w4 and w4.also)
 
 
+def test_an_old_reading_is_not_evidence_of_headroom():
+    """The staleness problem review named: "an hour of 84% is treated as live
+    plenty of room."
+
+    `should_seal` compared `used_percent` against the margin and nothing else,
+    so a reading was a current fact for the whole hour MAX_AGE allows. And
+    staleness here is ONE-DIRECTIONAL: usage inside a window only grows (a real
+    reset changes resets_at, and an expired window is dropped before it gets
+    here), so an old reading always UNDERSTATES. It cannot cause a false seal;
+    it causes no seal at all, which is the only failure that matters.
+
+    The fix is arithmetic, not a smaller MAX_AGE. Inside a window of length L,
+    usage cannot exceed 100% over L, so in `age` seconds it can have grown by
+    at most (age/L)*100 points -- an inarguable ceiling on burn rate.
+    """
+    now = time.time()
+
+    def w(pct, age, minutes=300):
+        return W.Window(pct, minutes, resets_at=now + 99999,
+                        source="codex", observed_at=now - age)
+
+    check("84% measured NOW does not seal -- it really is under the margin",
+          W.should_seal(w(84, 0), 0.85) is False)
+    check("84% measured 50 minutes ago DOES",
+          W.should_seal(w(84, 3000), 0.85) is True,
+          w(84, 3000).worst_case_percent)
+    check("because its ceiling has crossed 85",
+          w(84, 3000).worst_case_percent > 85.0,
+          w(84, 3000).worst_case_percent)
+    check("40% measured 50 minutes ago still does not",
+          W.should_seal(w(40, 3000), 0.85) is False,
+          w(40, 3000).worst_case_percent)
+    check("and that False is earned: the ceiling is provably under the margin",
+          w(40, 3000).worst_case_percent < 85.0,
+          w(40, 3000).worst_case_percent)
+
+    # A longer window moves more slowly, so the same age costs it far less.
+    # This falls out of the arithmetic rather than being special-cased.
+    check("58% of a WEEKLY window is barely moved by 50 minutes",
+          abs(w(58, 3000, 10080).worst_case_percent - 58.5) < 0.1,
+          w(58, 3000, 10080).worst_case_percent)
+    check("so it does not seal", W.should_seal(w(58, 3000, 10080), 0.85) is False)
+
+    # Already across when measured: age cannot rescue it, in either direction.
+    check("a reading already past the margin stays past it",
+          W.should_seal(w(90, 0), 0.85) is True)
+    check("even a very old one", W.should_seal(w(90, 3500), 0.85) is True)
+
+
+def test_growth_that_cannot_be_bounded_answers_i_do_not_know():
+    """No window length means no arithmetic. A recent reading is still taken
+    at face value; an older one must not be reported as headroom, so it
+    answers None and routes to the at-the-wall check."""
+    now = time.time()
+    fresh = W.Window(50.0, None, source="grok", observed_at=now - 5)
+    check("no length is bounded", fresh.worst_case_percent is None)
+    check("but a recent reading is usable",
+          W.should_seal(fresh, 0.85) is False)
+    old = W.Window(50.0, None, source="grok", observed_at=now - 3000)
+    check("an older unboundable reading answers None, not False",
+          W.should_seal(old, 0.85) is None)
+    across = W.Window(95.0, None, source="grok", observed_at=now - 3000)
+    check("unless it was already across", W.should_seal(across, 0.85) is True)
+
+    # Claude names its windows rather than giving a length, so the length is
+    # looked up -- otherwise the whole Claude path would be unboundable.
+    c = W.Window(84.0, None, source="claude", observed_at=now - 3000)
+    c.fixed_label = "claude 5h"
+    check("a claude 5h window has a known length",
+          c.window_seconds == 18000.0, c.window_seconds)
+    check("so an hour-old 84% seals there too",
+          W.should_seal(c, 0.85) is True, c.worst_case_percent)
+
+
+def test_the_bound_is_used_for_the_decision_and_never_reported():
+    """A decision may be conservative. A document may not: the letter says
+    what was measured, because that is what the reader is being told was
+    observed."""
+    now = time.time()
+    w = W.Window(84.0, 300, resets_at=now + 9999, source="codex",
+                 observed_at=now - 3000)
+    check("the decision uses the ceiling", W.should_seal(w, 0.85) is True)
+    check("but as_dict reports the MEASURED figure",
+          w.as_dict()["used_percent"] == 84.0, w.as_dict())
+    check("and no worst-case number appears in it",
+          not any("worst" in k for k in w.as_dict()), w.as_dict())
+    src = open(os.path.join(ROOT, "src", "dimissory", "window.py")).read()
+    check("the module records that distinction",
+          "NEVER REPORTED AS A MEASUREMENT" in src)
+
+
 def test_a_reading_stamped_in_the_future_is_refused():
     """is_stale asked only `age > MAX_AGE`, so a negative age sailed through
     as fresh -- the failure pointing the wrong way, since refusing what it
@@ -394,6 +485,9 @@ def main():
     for t in (test_a_codex_rollout_yields_the_window,
               test_the_binding_window_is_whichever_is_nearest_full,
               test_a_placeholder_zero_does_not_erase_a_real_reading,
+              test_an_old_reading_is_not_evidence_of_headroom,
+              test_growth_that_cannot_be_bounded_answers_i_do_not_know,
+              test_the_bound_is_used_for_the_decision_and_never_reported,
               test_a_reading_stamped_in_the_future_is_refused,
               test_a_claude_session_never_borrows_another_products_meter,
               test_the_newest_reading_wins,

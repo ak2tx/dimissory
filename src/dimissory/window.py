@@ -86,6 +86,17 @@ _TAIL = 2_000_000
 # readings it cannot vouch for.
 MAX_SKEW = 120.0
 
+# A reading with no knowable window length cannot have its growth bounded, so
+# it is taken at face value only while it is genuinely recent. Past this it
+# answers "I do not know" rather than "there is headroom".
+FRESH_FOR = 120.0
+
+# Claude's statusline names its windows instead of giving a length, so the
+# length is looked up rather than derived. These are the documented spans, and
+# they are needed for the growth bound below -- without a length there is no
+# arithmetic, only a guess.
+CLAUDE_WINDOW_MINUTES = {"claude 5h": 300, "claude 7d": 10080}
+
 
 class Window:
     """One plan window, and how it was learned.
@@ -124,6 +135,49 @@ class Window:
         # fresh, which is the one direction that matters: it makes an old
         # reading look current to the code that decides when to seal.
         return a > MAX_AGE or a < -MAX_SKEW
+
+    @property
+    def window_seconds(self):
+        """How long this window spans, or None when that is not knowable."""
+        minutes = self.window_minutes
+        if not minutes:
+            minutes = CLAUDE_WINDOW_MINUTES.get(self.fixed_label or "")
+        try:
+            return float(minutes) * 60.0 if minutes else None
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def worst_case_percent(self):
+        """The most this window COULD have reached since it was measured.
+
+        This is the answer to the staleness problem, and it is arithmetic
+        rather than a guess: inside a window of length L, usage cannot exceed
+        100% over L, so in `age` seconds it can have grown by at most
+        (age / L) * 100 points. That is an inarguable ceiling on burn rate.
+
+        Why it matters is that staleness here is ONE-DIRECTIONAL. Usage inside
+        a window only grows -- a real reset changes `resets_at`, and an expired
+        window is dropped before it reaches here -- so an old reading always
+        UNDERSTATES current usage. The failure it produces is therefore never
+        a false seal; it is failing to seal at all, which is the product's
+        entire purpose. Review put it exactly: "an hour of 84% is treated as
+        live plenty of room."
+
+        Shrinking MAX_AGE only narrows the window in which that is wrong. This
+        removes the reasoning error instead: as a reading ages, the ceiling
+        rises, so it stops being evidence of headroom on its own schedule.
+
+        NEVER REPORTED AS A MEASUREMENT. `used_percent` is what a letter says,
+        because that is what was observed. This bound informs one decision --
+        whether to seal -- and a decision may be conservative where a document
+        may not.
+        """
+        span = self.window_seconds
+        age = self.age
+        if span is None or age is None or age < 0:
+            return None
+        return self.used_percent + (age / span) * 100.0
 
     def label(self):
         if self.fixed_label:
@@ -528,13 +582,44 @@ def read(transcript=None, provider=None, grok_root=None, claude_root=None):
 
 
 def should_seal(window, at=0.85):
-    """Whether the window has crossed the margin where a letter is due.
+    """Whether a letter is due. True, False, or None for "no usable answer".
 
-    Returns None when there is no usable reading -- NOT False. "No meter" and
-    "plenty of room" are different states, and collapsing them would let a
-    session with no window data run to the wall while reporting that it was
-    fine.
+    None is not False. "No meter" and "plenty of room" are different states,
+    and collapsing them lets a session with no window data run to the wall
+    while reporting that it was fine.
+
+    THE AGE OF THE READING IS PART OF THE DECISION. The old version compared
+    `used_percent` against the margin and nothing else, so a reading was
+    treated as a current fact for the whole hour MAX_AGE allows -- and since
+    staleness here only ever understates usage, an hour-old 84% was reported
+    as headroom while the window could already be full. That is a failure to
+    write the letter, which is the one failure this project exists to prevent.
+
+    So three questions, in order:
+
+      already across?   usage only grows inside a window, so a reading that
+                        was at or past the margin when measured is still past
+                        it now. Age cannot rescue it.
+      could it be?      `worst_case_percent` bounds how far it can have moved
+                        since. If the ceiling crosses the margin, seal: being
+                        early costs a letter, being late costs the run.
+      provably not?     if the ceiling is still under the margin, there is
+                        real headroom and that is a measured False.
+
+    When the growth cannot be bounded at all -- no window length -- a recent
+    reading is taken at face value and an older one answers None, because
+    "I cannot tell" is the honest response and it routes to the at-the-wall
+    check rather than to silence.
     """
     if window is None:
         return None
-    return window.used_percent >= at * 100.0
+    margin = at * 100.0
+    if window.used_percent >= margin:
+        return True
+    ceiling = window.worst_case_percent
+    if ceiling is None:
+        age = window.age
+        if age is not None and 0 <= age <= FRESH_FOR:
+            return False
+        return None
+    return ceiling >= margin

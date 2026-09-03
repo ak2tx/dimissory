@@ -12,7 +12,7 @@ the work instead of reconstructing it. On another account, or another model.
 
 > **Status: early, `0.0.1`, no PyPI release yet.** The brief format, the trust
 > contract, the verify mechanism, the agent hooks and the plan-window meter all
-> work and are tested — 428 checks across 10 files. What is *not* done is listed
+> work and are tested — 501 checks across 10 files. What is *not* done is listed
 > under [What is built](#what-is-built), including the one gap that matters:
 > `codex exec` has no seal path. Claude needs `dim statusline --install` as a
 > second step, and `dim status` will tell you if you skipped it.
@@ -159,9 +159,20 @@ that carries the number only exists in the interactive TUI.
 on tool calls; the statusline does *not* — Claude Code re-renders on session
 start, each new assistant message, `/compact`, and a `refreshInterval` timer.
 A long single tool call or a long reasoning stretch leaves the reading frozen
-in between. Install therefore sets `refreshInterval` so the sample refreshes
-on a timer, and a reading older than an hour is refused outright rather than
-trusted.
+in between, so install sets `refreshInterval` to keep it moving.
+
+That gap is handled by arithmetic rather than by trusting the sample.
+Staleness here is **one-directional**: usage inside a window only grows, so an
+old reading always *understates*. It can never cause a false seal — it causes
+**no seal at all**, which is the only failure that matters. And the growth has
+a ceiling: inside a window of length L, usage cannot exceed 100% over L, so in
+`age` seconds it can have risen by at most `(age / L) × 100` points.
+
+So the decision asks whether the *ceiling* has crossed the margin, not whether
+the last sample did. An 84% reading taken an hour ago seals; the same reading
+taken a minute ago does not; 58% of a weekly cap barely moves in an hour and
+correctly doesn't. The ceiling drives the decision only — a letter always
+reports the figure that was actually measured.
 
 ### The gate is a request, not a guarantee
 
