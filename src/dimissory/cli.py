@@ -19,7 +19,7 @@ import sys
 
 from . import __version__
 from .brief import Brief, Declared
-from .config import Config
+from .config import Config, write_at
 from .observe import checks_for, observe
 from .render import render
 
@@ -447,6 +447,85 @@ def cmd_statusline(args):
     return statusline.main(argv)
 
 
+def cmd_meter(args):
+    """`dim meter` -- how much of every plan window is gone. That is all.
+
+    `dim status` answers "is this tool set up correctly". This answers "how
+    much have I got left", which is a different question and the one people
+    actually have. It works whether or not any hook is installed.
+
+    It also REFRESHES what it can, which is the difference between a meter and
+    a cache. Grok writes its billing row only when its interactive pager
+    starts, so on an agent-driven box the row goes stale precisely while you
+    are working: measured at 35% while the account was at 80%, hidden for 61
+    hours because the file's mtime kept looking fresh. Starting the vendor's
+    own CLI briefly costs no tokens and corrected it in 22 seconds.
+    """
+    from . import refresh as R
+    from . import window as W
+
+    readings = {
+        "claude": W._claude(getattr(args, "window_cache", None)),
+        "codex": W._codex(getattr(args, "transcript", None)),
+        "grok": W._grok(),
+    }
+
+    if not getattr(args, "no_refresh", False):
+        for provider in R.stale_providers(readings):
+            print(f"  {provider}: reading is stale, asking {provider} to "
+                  f"refresh it...", file=sys.stderr)
+            if R.refresh(provider):
+                readings[provider] = W._grok() if provider == "grok" else None
+            else:
+                print(f"  {provider}: could not refresh", file=sys.stderr)
+
+    rows, worst = [], None
+    for provider, win in readings.items():
+        if win is None:
+            rows.append((provider, "-", "no reading", ""))
+            continue
+        age = "?" if win.age is None else _age(win.age)
+        note = ""
+        if win.is_stale:
+            note = "STALE -- not safe to act on"
+        elif worst is None or win.used_percent > worst.used_percent:
+            worst = win
+        when = _when(win.resets_at) if win.resets_at else ""
+        rows.append((provider, f"{win.used_percent:.0f}%",
+                     f"{win.label()}{', resets ' + when if when else ''}",
+                     f"{age} old{'  ' + note if note else ''}"))
+        for other in win.also:
+            rows.append(("", f"{other.used_percent:.0f}%", other.label(), ""))
+
+    width = max((len(r[2]) for r in rows), default=10)
+    for provider, pct, what, note in rows:
+        print(f"{provider:8} {pct:>5}  {what:<{width}}  {note}")
+
+    if worst is None:
+        print("\nno usable reading anywhere -- nothing here can tell you how "
+              "much is left.", file=sys.stderr)
+        return 1
+    print()
+    at = write_at(Config.load(getattr(args, "config", None)))
+    if W.should_seal(worst, at):
+        print(f"past the {at * 100:.0f}% margin on {worst.label()} -- a letter "
+              f"is due.")
+    else:
+        print(f"under the {at * 100:.0f}% margin. Nearest is {worst.label()} "
+              f"at {worst.used_percent:.0f}%.")
+    return 0
+
+
+def _age(seconds):
+    if seconds < 90:
+        return f"{int(seconds)}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
 def cmd_status(args):
     """`dim status` -- what the meter can see, per agent, and what it cannot.
 
@@ -465,7 +544,6 @@ def cmd_status(args):
               file=sys.stderr)
 
     detected = I.detect()
-    from .config import write_at
     at = write_at(cfg)
     print(f"seal at        {at * 100:.0f}% of a plan window")
     print(f"letters        {cfg.letters_dir}")
@@ -612,6 +690,15 @@ def main(argv=None):
 
     r = sub.add_parser("resume", help="verify a letter still holds")
     r.add_argument("path", nargs="?"); r.set_defaults(fn=cmd_resume)
+
+    mt = sub.add_parser("meter",
+                        help="how much of every plan window is gone")
+    mt.add_argument("--no-refresh", action="store_true",
+                    help="do not ask a vendor to refresh a stale reading")
+    mt.add_argument("--transcript", help="a session transcript, for Codex")
+    mt.add_argument("--window-cache", dest="window_cache", default=None,
+                    help="where the statusline recorded Claude's window")
+    mt.set_defaults(fn=cmd_meter)
 
     st = sub.add_parser("status",
                         help="what the meter can see, per agent, and what it "
