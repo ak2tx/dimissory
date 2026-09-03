@@ -288,6 +288,39 @@ def test_the_bound_is_used_for_the_decision_and_never_reported():
           "NEVER REPORTED AS A MEASUREMENT" in src)
 
 
+def test_the_window_name_and_the_other_caps_reach_the_letter():
+    """Found by mutation testing. Both were computed and then asserted
+    nowhere, so dropping either stayed green.
+
+    A bare "84% used" does not say 84% of WHAT, and the meter reports whichever
+    cap is nearest full -- measured as the weekly one in 71 of 295 real Codex
+    readings. Reporting the binding figure while hiding which window it belongs
+    to, and hiding that another cap sits at 96%, is a letter that misleads by
+    omission.
+    """
+    from dimissory.brief import Brief, Declared
+    from dimissory.observe import observe
+    from dimissory.render import render
+
+    now = time.time()
+    win = W.Window(84.0, 300, resets_at=now + 3600, source="codex",
+                   observed_at=now)
+    win.also = [W.Window(96.0, 10080, resets_at=now + 86400, source="codex",
+                         observed_at=now)]
+    o = observe(cwd=os.path.dirname(ROOT), window=win.as_dict())
+    letter = render(Brief(session="s", observed=o, declared=Declared()))
+
+    check("the letter names the window the figure belongs to",
+          "codex 5h" in letter, [l for l in letter.splitlines() if "%" in l])
+    check("and reports the measured figure", "84% used" in letter,
+          [l for l in letter.splitlines() if "used" in l])
+    check("the other cap appears too", "codex 1w" in letter,
+          [l for l in letter.splitlines() if "%" in l])
+    check("with its own figure, which is the higher one",
+          "96% used" in letter,
+          [l for l in letter.splitlines() if "used" in l])
+
+
 def test_a_reading_stamped_in_the_future_is_refused():
     """is_stale asked only `age > MAX_AGE`, so a negative age sailed through
     as fresh -- the failure pointing the wrong way, since refusing what it
@@ -488,6 +521,7 @@ def main():
               test_an_old_reading_is_not_evidence_of_headroom,
               test_growth_that_cannot_be_bounded_answers_i_do_not_know,
               test_the_bound_is_used_for_the_decision_and_never_reported,
+              test_the_window_name_and_the_other_caps_reach_the_letter,
               test_a_reading_stamped_in_the_future_is_refused,
               test_a_claude_session_never_borrows_another_products_meter,
               test_the_newest_reading_wins,

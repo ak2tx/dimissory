@@ -77,51 +77,11 @@ def cache_path(root=None):
     return os.path.expanduser(root or DEFAULT_CACHE)
 
 
-def percentage(value):
-    """A usable percentage, or None. Rejects what `isinstance` lets through.
-
-    `isinstance(v, (int, float))` accepts `True`, `NaN` and `inf`, and every
-    one of those is a live defect in the number that decides when to seal:
-
-        True    bool subclasses int, so float(True) is 1.0
-        inf     `inf >= 85` is True -- an immediate seal, forever
-        NaN     every comparison is False, so it reads as "plenty of room"
-                while also defeating any ordering
-
-    Both R3 reviewers found this independently. The bound is generous at the
-    top because a spend limit is documented as able to exceed 100.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        pct = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if pct != pct or pct in (float("inf"), float("-inf")):
-        return None                       # NaN, +inf, -inf
-    if pct < 0.0 or pct > 1000.0:
-        return None                       # not a percentage anybody measured
-    return pct
-
-
-def reset_time(value):
-    """A plausible reset epoch, or None. Same reasoning as `percentage`.
-
-    A NaN reset defeats the expiry check specifically: `NaN <= now` is False,
-    so it never looks expired and the window it belongs to never retires.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        at = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if at != at or at in (float("inf"), float("-inf")):
-        return None
-    # Anything outside a couple of decades either side is not a reset time.
-    if not (946_684_800 < at < 4_102_444_800):
-        return None
-    return at
+# The validators live in window.py -- one owner, and the direction that lets
+# `_codex` and `_grok` use them too. Review found only the Claude path
+# validating: a NaN in a Codex rollout became Window(nan%) and should_seal
+# returned False, which reads as headroom.
+from .window import percentage, reset_time            # noqa: E402
 
 
 def extract(payload):
@@ -197,7 +157,13 @@ def record(payload, root=None):
             if held and held.get("resets_at") == w.get("resets_at") \
                     and isinstance(held.get("used_percent"), (int, float)) \
                     and held["used_percent"] > w["used_percent"]:
-                continue          # same window, lower number: a late sample
+                # Same window, lower number: a late sample. The HIGHER value
+                # is kept -- and so is the time IT was measured. Stamping
+                # `now` here would keep the number and throw away its age,
+                # which is exactly how the growth ceiling got laundered: an
+                # hour-old 84% came back looking one second old and stopped
+                # sealing. `seen_at` belongs to the reading, not to the write.
+                continue
             merged[w["kind"]] = dict(w, seen_at=now)
         # Drop windows whose reset has passed rather than carrying them
         # forever; Claude Code stops sending them, so nothing would.

@@ -481,7 +481,12 @@ def cmd_status(args):
     rows, ready = [], []
     for key in ("claude", "codex", "grok"):
         on_path = bool(detected.get(key))
-        installed = "-"
+        # `missing` initialised BEFORE the try. Review reproduced an
+        # UnboundLocalError here: an unreadable settings.json raises
+        # InstallRefused, `missing` is never bound, and the readiness loop
+        # below reads it -- so the diagnostic command crashes in exactly the
+        # situation it exists to diagnose.
+        installed, missing = "-", []
         try:
             # `plan` returns the events it WOULD add, so an empty list means
             # everything is already there. Reducing that to yes/no threw away

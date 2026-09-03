@@ -232,6 +232,40 @@ def test_setup_cannot_reach_a_real_home():
                   for t in touched), touched)
 
 
+def test_the_seal_margin_refuses_a_bool_and_never_or_defaults():
+    """Found by mutation testing. The fix shipped with no test at all.
+
+    Two bugs lived on this one line. `cfg.get(...) or 0.85` turned a configured
+    0 -- "always seal" -- into 0.85. Replacing that with an isinstance check
+    then admitted TOML `true`/`false`, because bool subclasses int, so
+    `write_at = false` became 0.0 and ALSO meant "always seal". Both were fixed
+    and neither was asserted, so reverting either stayed green.
+    """
+    from dimissory.config import write_at
+
+    class Fake:
+        def __init__(self, v):
+            self._v = v
+
+        def get(self, _section, _key):
+            return self._v
+
+    check("a real 0 survives -- it means always seal",
+          write_at(Fake(0)) == 0.0, write_at(Fake(0)))
+    check("and is not replaced by the default",
+          write_at(Fake(0)) != 0.85)
+    check("a fraction passes through", write_at(Fake(0.5)) == 0.5)
+    for bad in (False, True, None, "0.9", [], {}, -0.1, 1.1):
+        check(f"{bad!r} falls back to the default",
+              write_at(Fake(bad)) == 0.85, write_at(Fake(bad)))
+
+    # And the hook must use the same accessor, or the two can disagree about
+    # where the margin is.
+    src = open(os.path.join(ROOT, "src", "dimissory", "hook.py")).read()
+    check("the hook reads the margin through config.write_at",
+          "write_at(cfg)" in src)
+
+
 def test_a_windows_path_survives_being_written_and_read_back():
     """The config must be parseable by the tool that wrote it.
 
@@ -282,6 +316,7 @@ def main():
               test_the_written_config_parses_back_to_the_same_values,
               test_setup_is_safe_to_rerun_and_never_blocks,
               test_setup_cannot_reach_a_real_home,
+              test_the_seal_margin_refuses_a_bool_and_never_or_defaults,
               test_a_windows_path_survives_being_written_and_read_back):
         t()
     print("\n" + "=" * 64)

@@ -98,6 +98,58 @@ FRESH_FOR = 120.0
 CLAUDE_WINDOW_MINUTES = {"claude 5h": 300, "claude 7d": 10080}
 
 
+def percentage(value):
+    """A usable percentage, or None. Rejects what `isinstance` lets through.
+
+    `isinstance(v, (int, float))` accepts `True`, `NaN` and `inf`, and each is
+    a live defect in the number that decides when to seal:
+
+        True    bool subclasses int, so float(True) is 1.0
+        inf     `inf >= 85` is True -- an immediate seal, forever
+        NaN     every comparison is False, so it reads as "plenty of room"
+                while also defeating any ordering
+
+    This lives HERE, not in statusline.py, because that is where it was and
+    review found the consequence: only the Claude path validated. `_codex` and
+    `_grok` still took `isinstance`, so a NaN in a Codex rollout produced
+    `Window(nan%)` and `should_seal` returned False -- reported as headroom.
+    Validation belongs with the type it protects.
+
+    The ceiling is generous because a spend limit is documented as able to
+    exceed 100.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        pct = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if pct != pct or pct in (float("inf"), float("-inf")):
+        return None
+    if pct < 0.0 or pct > 1000.0:
+        return None
+    return pct
+
+
+def reset_time(value):
+    """A plausible epoch, or None. Same reasoning as `percentage`.
+
+    A NaN reset defeats the expiry check specifically: `NaN <= now` is False,
+    so the window it belongs to never looks expired and never retires.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        at = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if at != at or at in (float("inf"), float("-inf")):
+        return None
+    if not (946_684_800 < at < 4_102_444_800):
+        return None
+    return at
+
+
 class Window:
     """One plan window, and how it was learned.
 
@@ -245,7 +297,6 @@ def _codex(transcript):
     # Grouped by window identity, because a percentage is only comparable
     # against others measured in the SAME window.
     groups: dict = {}
-    latest_at = None
     plan = None
     try:
         with open(transcript, "rb") as fh:
@@ -271,22 +322,32 @@ def _codex(transcript):
                 if not isinstance(rl, dict):
                     continue
                 at = _epoch(d.get("timestamp"))
-                if at is not None:
-                    latest_at = at if latest_at is None else max(latest_at, at)
                 plan = rl.get("plan_type") or plan
                 for slot, minutes_default in (("primary", None),
                                               ("secondary", None)):
                     part = rl.get(slot)
                     if not isinstance(part, dict):
                         continue
-                    pct = part.get("used_percent")
-                    if not isinstance(pct, (int, float)):
+                    # Validated, not merely isinstance'd. `_codex` was the
+                    # path review found still accepting NaN -- which produced
+                    # Window(nan%) and a should_seal of False, i.e. reported
+                    # as headroom.
+                    pct = percentage(part.get("used_percent"))
+                    if pct is None:
                         continue
                     key = (slot, part.get("resets_at"))
                     prev = groups.get(key)
                     if prev is None or pct > prev[0]:
-                        groups[key] = (float(pct), part.get("window_minutes"),
-                                       part.get("resets_at"))
+                        # THE TIMESTAMP OF THE WINNING READING, not the newest
+                        # one in the file. `latest_at = max(timestamp)` took
+                        # the stamp of every token_count event, including the
+                        # 0.0 placeholders that do NOT win the percentage. So
+                        # an 84% from an hour ago followed by a placeholder now
+                        # came back looking one second old, its growth ceiling
+                        # collapsed, and should_seal said False. Measured by
+                        # review: the MAX_AGE fix was bypassed on Codex too.
+                        groups[key] = (pct, part.get("window_minutes"),
+                                       part.get("resets_at"), at)
     except OSError:
         return None
     if not groups:
@@ -328,11 +389,11 @@ def _codex(transcript):
         # account, and `ranked` puts the non-zero one first, so that reading
         # survives and keeps its real 0% in `also`.
         return None
-    pct, minutes, resets = ranked[0]
-    win = Window(pct, minutes, resets, source="codex", observed_at=latest_at,
+    pct, minutes, resets, seen = ranked[0]
+    win = Window(pct, minutes, resets, source="codex", observed_at=seen,
                  plan=plan)
-    win.also = [Window(p, m, r, source="codex", observed_at=latest_at,
-                       plan=plan) for p, m, r in ranked[1:]]
+    win.also = [Window(p, m, r, source="codex", observed_at=a, plan=plan)
+                for p, m, r, a in ranked[1:]]
     return win
 
 
@@ -362,8 +423,10 @@ def _grok(root=None):
     def dig(o):
         if isinstance(o, dict):
             for k, v in o.items():
-                if k == "creditUsagePercent" and isinstance(v, (int, float)):
-                    return float(v)
+                if k == "creditUsagePercent":
+                    got = percentage(v)
+                    if got is not None:
+                        return got
                 got = dig(v)
                 if got is not None:
                     return got
@@ -414,10 +477,9 @@ def _claude(cache_root=None):
     # edited, corrupted or poisoned cache could otherwise assert 1000000%
     # (seal now, forever), `inf` (the same), or NaN (every comparison false,
     # so it reads as budget to spare while breaking any ordering).
-    from .statusline import percentage, reset_time
     if blob.get("source") not in (None, "claude"):
         return None
-    at = reset_time(blob.get("observed_at"))
+    written_at = reset_time(blob.get("observed_at"))
     now = time.time()
     live = []
     for w in blob.get("windows") or []:
@@ -433,7 +495,22 @@ def _claude(cache_root=None):
         if not isinstance(label, str) or not label or len(label) > 64 \
                 or any(c < " " for c in label):
             label = "claude"          # never put control characters in a letter
-        live.append((pct, label, resets))
+        # EACH WINDOW CARRIES ITS OWN AGE, and this is the whole point.
+        #
+        # The file's `observed_at` is when the file was last WRITTEN, which is
+        # not when this percentage was MEASURED. The R3 merge keeps a window
+        # that the newest payload did not mention -- deliberately, so one
+        # session cannot erase another's reading -- and then rewrote the
+        # file's timestamp. So an hour-old 84% five-hour reading came back
+        # looking one second old, its growth ceiling collapsed to 84%, and
+        # `should_seal` said False.
+        #
+        # That made the entire MAX_AGE fix dead on the meter it was written
+        # for: not replaced, BYPASSED. Review measured it. `seen_at` is
+        # stamped per window by `record`, and reading it is what makes the
+        # ceiling mean anything.
+        seen = reset_time(w.get("seen_at"))
+        live.append((pct, label, resets, seen if seen is not None else written_at))
     if not live:
         return None
     # Sorted by an EXPLICIT key. `live.sort(reverse=True)` compared whole
@@ -444,11 +521,11 @@ def _claude(cache_root=None):
     # reduced to the quietest. This is the same mixed-type comparison `rank()`
     # was written to kill in `_codex`, reintroduced on the Claude path.
     live.sort(key=lambda row: row[0], reverse=True)
-    pct, label, resets = live[0]
-    win = Window(pct, None, resets, source="claude", observed_at=at)
+    pct, label, resets, seen = live[0]
+    win = Window(pct, None, resets, source="claude", observed_at=seen)
     win.fixed_label = label
-    for p, lb, r in live[1:]:
-        other = Window(p, None, r, source="claude", observed_at=at)
+    for p, lb, r, s_at in live[1:]:
+        other = Window(p, None, r, source="claude", observed_at=s_at)
         other.fixed_label = lb
         win.also.append(other)
     return win

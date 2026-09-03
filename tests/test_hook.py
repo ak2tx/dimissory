@@ -329,6 +329,47 @@ def test_a_file_edited_while_the_prompt_waits_is_not_silently_reverted():
     check("an untouched file installs normally", bool(added), added)
 
 
+def test_the_statusline_install_also_refuses_a_file_changed_mid_prompt():
+    """Found by mutation testing, not by review or by reading.
+
+    `install` had this test; `install_statusline` did not. Disabling the
+    fingerprint check left all 501 checks green, because the mutation landed on
+    whichever copy of the guard came first in the file and nothing exercised
+    that one. Two functions, one rule, one test -- the same shape as the O_EXCL
+    fix that lived in hook.seal and not in `dim write`.
+    """
+    d = tempfile.mkdtemp(prefix="dim-sl-toctou-")
+    p = os.path.join(d, "settings.json")
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"theme": "dark"}, fh)
+
+    def meddle_then_agree(_prompt):
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"theme": "dark", "permissions": {"allow": ["Bash"]}}, fh)
+        return "y"
+
+    try:
+        I.install_statusline(command="dim statusline", path=p,
+                             ask=meddle_then_agree, out=lambda *_a: None)
+        check("a statusline install refuses a changed file", False,
+              "it proceeded and would have reverted the edit")
+    except I.InstallRefused as e:
+        check("a statusline install refuses a changed file", True)
+        check("and says the file changed", "changed while waiting" in str(e),
+              str(e)[:70])
+    check("the concurrent edit survives",
+          "permissions" in open(p, encoding="utf-8").read())
+
+    # And an untouched file must still install, or the guard broke the feature.
+    d2 = tempfile.mkdtemp(prefix="dim-sl-ok-")
+    p2 = os.path.join(d2, "settings.json")
+    with open(p2, "w", encoding="utf-8") as fh:
+        json.dump({"theme": "dark"}, fh)
+    got, _note = I.install_statusline(command="dim statusline", path=p2,
+                                      ask=lambda _p: "y", out=lambda *_a: None)
+    check("an untouched file installs normally", got == p2, got)
+
+
 def test_codex_is_not_given_a_turn_end_gate_it_does_not_have():
     """Codex's event registry has no bare Stop. Installing one would put a
     hook in the file that can never fire -- configuration that looks like
@@ -359,6 +400,7 @@ def main():
               test_the_previous_file_is_kept_and_never_overwritten,
               test_a_leftover_backup_name_cannot_cost_the_original,
               test_a_file_edited_while_the_prompt_waits_is_not_silently_reverted,
+              test_the_statusline_install_also_refuses_a_file_changed_mid_prompt,
               test_codex_is_not_given_a_turn_end_gate_it_does_not_have):
         t()
     print("\n" + "=" * 66)

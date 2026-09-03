@@ -166,11 +166,74 @@ def test_a_window_past_its_reset_is_dropped_not_reported():
           W.should_seal(W._claude(c)) is None)
 
 
+def test_a_window_keeps_its_own_age_when_another_is_updated():
+    """The R4 finding, and the reason `seen_at` exists.
+
+    The merge deliberately keeps a window the newest payload did not mention,
+    so one session cannot erase another's reading. But it then rewrote the
+    FILE's timestamp, and `_claude` dated every window by the file -- so an
+    hour-old 84% five-hour reading came back looking one second old, its
+    growth ceiling collapsed to 84%, and `should_seal` said False.
+
+    The MAX_AGE work was not replaced by that. It was BYPASSED: dead on the
+    one meter it was written for.
+    """
+    c = _cache()
+    now = time.time()
+    S.record({"rate_limits": {"five_hour": {"used_percentage": 84,
+              "resets_at": int(now + 3600)}}}, c)
+    blob = json.load(open(c, encoding="utf-8"))
+    blob["observed_at"] = now - 3000
+    for w in blob["windows"]:
+        w["seen_at"] = now - 3000
+    with open(c, "w", encoding="utf-8") as fh:
+        json.dump(blob, fh)
+    check("an hour-old 84% seals on its own",
+          W.should_seal(W._claude(c), 0.85) is True)
+
+    # A weekly-only report arrives. The five-hour reading is KEPT, and it must
+    # keep its age with it.
+    S.record({"rate_limits": {"seven_day": {"used_percentage": 41,
+              "resets_at": int(now + 86400)}}}, c)
+    w = W._claude(c)
+    check("the kept reading is still the binding one",
+          w and abs(w.used_percent - 84.0) < 1e-9, w)
+    check("and it did NOT become one second old",
+          w and w.age > 2500, w and w.age)
+    check("so it still seals", W.should_seal(w, 0.85) is True,
+          w and w.worst_case_percent)
+
+    # A late LOWER sample of the same window does the same thing without a
+    # second session: the higher value is kept, so its age must be too.
+    c2 = _cache()
+    S.record({"rate_limits": {"five_hour": {"used_percentage": 84,
+              "resets_at": int(now + 3600)}}}, c2)
+    blob = json.load(open(c2, encoding="utf-8"))
+    blob["observed_at"] = now - 3000
+    for w in blob["windows"]:
+        w["seen_at"] = now - 3000
+    with open(c2, "w", encoding="utf-8") as fh:
+        json.dump(blob, fh)
+    S.record({"rate_limits": {"five_hour": {"used_percentage": 12,
+              "resets_at": int(now + 3600)}}}, c2)
+    w2 = W._claude(c2)
+    check("a late lower sample keeps the higher value",
+          w2 and abs(w2.used_percent - 84.0) < 1e-9, w2)
+    check("and does not reset its age", w2 and w2.age > 2500, w2 and w2.age)
+
+
 def test_a_stale_recording_is_refused_like_any_other():
     c = _cache()
     S.record(_payload(), c)
     blob = json.load(open(c))
-    blob["observed_at"] = time.time() - (W.MAX_AGE + 600)
+    old = time.time() - (W.MAX_AGE + 600)
+    # BOTH, and the per-window one is what actually counts now. Ageing only
+    # the file's timestamp used to age the reading, because `_claude` dated
+    # every window by the file. That was the laundering bug: this test aged
+    # the wrong field and still passed.
+    blob["observed_at"] = old
+    for w in blob["windows"]:
+        w["seen_at"] = old
     with open(c, "w", encoding="utf-8") as fh:
         json.dump(blob, fh)
     w = W._claude(c)
@@ -498,6 +561,7 @@ def main():
               test_absence_is_never_zero,
               test_one_window_missing_does_not_hide_the_other,
               test_a_window_past_its_reset_is_dropped_not_reported,
+              test_a_window_keeps_its_own_age_when_another_is_updated,
               test_a_stale_recording_is_refused_like_any_other,
               test_the_round_trip_a_real_session_actually_takes,
               test_a_claude_session_still_never_borrows_groks_meter,

@@ -275,6 +275,45 @@ def test_two_seals_in_the_same_second_do_not_overwrite_each_other():
           len(paths) == len(set(paths)), paths)
 
 
+def test_the_hook_seals_where_dim_show_will_actually_look():
+    """Found by mutation testing. The fix had no test.
+
+    seal() hardcoded ~/.dimissory/letters while `dim show` and `dim resume`
+    read `letters.dir` from the config. Set that setting and letters went
+    somewhere nothing would ever read them, with success reported both times --
+    which is the predecessor's "wrong location reported as success", the
+    failure install.py keeps a whole docstring about. Reverting it stayed
+    green, because every other test in this file passes letters_dir
+    explicitly.
+    """
+    d = tempfile.mkdtemp(prefix="dim-where-")
+    configured = os.path.join(d, "somewhere-else")
+    cfg = os.path.join(d, "config.toml")
+    from dimissory.config import _toml_str
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write(f'[window]\nwrite_at = 0.85\n'
+                 f'[letters]\ndir = "{_toml_str(configured)}"\n')
+    os.environ["DIMISSORY_CONFIG"] = cfg
+    roll = _rollout(d)
+
+    # letters_dir NOT passed -- exactly how the hook runs in production.
+    # A session id nothing else could ever have written, so a leftover from
+    # an earlier run cannot be mistaken for a leak from this one. The first
+    # version matched on "where-" and failed on debris the mutation harness
+    # had left in the real directory -- a true assertion failing for an
+    # untrue reason, which is its own kind of unreliable test.
+    sid = f"where-{os.getpid()}-{int(time.time()*1000) % 100000}"
+    H.handle({"hook_event_name": "PostToolUse", "session_id": sid,
+              "transcript_path": roll, "cwd": d},
+             journal_root=os.path.join(d, "journal"))
+    check("the letter lands in the CONFIGURED directory",
+          _letters(configured) != [], os.listdir(d))
+    default = os.path.expanduser("~/.dimissory/letters")
+    stray = [f for f in (os.listdir(default) if os.path.isdir(default) else [])
+             if f.startswith(sid)]
+    check("and not in the hardcoded default", stray == [], stray)
+
+
 def test_below_the_margin_nothing_is_sealed_at_all():
     d, jr, letters = _bed()
     roll = _rollout(d, used=40.0)
@@ -308,6 +347,7 @@ def main():
               test_the_refresh_interval_is_honoured,
               test_grace_upgrades_a_degraded_letter_when_the_agent_finally_declares,
               test_two_seals_in_the_same_second_do_not_overwrite_each_other,
+              test_the_hook_seals_where_dim_show_will_actually_look,
               test_below_the_margin_nothing_is_sealed_at_all,
               test_a_bad_interval_does_not_become_zero):
         t()
