@@ -141,6 +141,25 @@ def declare(session, field, value, root=None, now=None):
     return p
 
 
+def _is_complete(line):
+    """Whether an unterminated final line is nonetheless a whole entry.
+
+    The test is the same one `read` applies to every other line: it parses,
+    and it carries the three fields an entry needs. Anything less is torn.
+    """
+    try:
+        d = json.loads(line.strip())
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(d, dict):
+        return False
+    try:
+        float(d["ts"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return isinstance(d.get("value"), str) and d.get("field") in WRITABLE
+
+
 def read(session, root=None):
     """Replay the journal into (values, ages).
 
@@ -164,14 +183,29 @@ def read(session, root=None):
             continue
         text = raw.decode("utf-8", "replace")
         lines = text.splitlines()
-        # An unterminated final line is a write in FLIGHT, not corruption.
-        # Counting it as damage would make every read during an active session
-        # report a damaged journal; including half of it would put a truncated
-        # decision in the letter. Dropping it is what makes sealing
-        # deterministic -- a declaration arriving mid-seal belongs to the next
-        # letter.
+        # An unterminated final line used to be dropped silently as "a write
+        # in FLIGHT, not corruption". That conflated two different things, and
+        # the difference is decidable:
+        #
+        #   it parses      the write COMPLETED and only lost its newline (a
+        #                  short write, a copy, an editor). The data is all
+        #                  there, and discarding it threw away a real
+        #                  declaration -- usually the newest one, which is
+        #                  exactly the `next` action a reader needs most.
+        #
+        #   it does not    genuinely truncated. Dropping it silently made a
+        #                  crash mid-write look identical to "the agent never
+        #                  declared", and the letter then presented the
+        #                  PREVIOUS next action as current, carrying its older
+        #                  timestamp. A stale plan presented as the live one is
+        #                  the worst thing this file can produce, so it is now
+        #                  counted and the caller can say so.
         if lines and not text.endswith("\n"):
-            lines.pop()
+            tail = lines.pop()
+            if _is_complete(tail):
+                lines.append(tail)
+            elif tail.strip():
+                damaged += 1
         for i, line in enumerate(lines):
             line = line.strip()
             if not line:

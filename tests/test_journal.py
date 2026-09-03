@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
@@ -259,14 +260,22 @@ def test_a_revoked_decision_does_not_survive_into_the_letter():
           "Lock around the whole request path" not in d.decided, d.decided)
 
 
-def test_a_write_in_flight_is_not_reported_as_damage():
-    """Sealing must be deterministic while hooks are still appending.
+def test_a_torn_final_line_is_counted_and_a_complete_one_is_kept():
+    """Sealing must be deterministic while hooks are still appending, and
+    silent loss is not the price of that.
 
-    Review: "sealing races with a concurrent declaration and produces
-    nondeterministic contents." An unterminated final line is a write in
-    FLIGHT, not corruption -- counting it as damage would make every seal
-    during an active session report a damaged journal, and including half of it
-    would put a truncated decision in the letter.
+    This test used to assert `damaged == 0` for a TRUNCATED final line, on the
+    grounds that an unterminated line is "a write in flight, not corruption".
+    Review round 1 showed that conflates two different things and hides the
+    worse one: a crash mid-write then looks identical to "the agent never
+    declared", and the letter presents the PREVIOUS next action as current,
+    carrying its older timestamp. A stale plan shown as the live one is the
+    worst output this module can produce.
+
+    The difference is decidable, so it is now decided: a final line that
+    PARSES completed and only lost its newline, and its data -- usually the
+    newest declaration, the one a reader most needs -- is kept. One that does
+    not parse is torn, and is counted so the caller can say so.
     """
     root = _root()
     J.declare("s", "task", "the real task", root=root)
@@ -274,13 +283,36 @@ def test_a_write_in_flight_is_not_reported_as_damage():
     with open(J.path_for("s", root), "a", encoding="utf-8") as fh:
         fh.write('{"ts": 1, "field": "decided", "value": "half a deci')  # no \n
     values, _ages, damaged = J.read("s", root)
-    check("the partial line is not counted as damage", damaged == 0, damaged)
-    check("and its content does not reach the letter",
+    check("a truncated final line IS counted", damaged == 1, damaged)
+    check("and its content still does not reach the letter",
           all("half a deci" not in v for v in values["decided"]),
           values["decided"])
     check("everything complete is still there",
           values["task"] == "the real task"
           and values["decided"] == ("a complete decision",), values)
+
+    # A complete line that merely lost its terminator is recovered, not
+    # discarded -- this was silently thrown away before, and it is the case
+    # that costs the reader the newest `next`.
+    root2 = _root()
+    J.declare("t", "task", "an older task", root=root2)
+    with open(J.path_for("t", root2), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": time.time(), "field": "next",
+                             "value": "run the ten-task test"}))   # no \n
+    values2, ages2, damaged2 = J.read("t", root2)
+    check("a complete-but-unterminated line is kept",
+          values2.get("next") == "run the ten-task test", values2)
+    check("and is not counted as damage", damaged2 == 0, damaged2)
+    check("it gets a real age, not a missing one",
+          "next" in ages2, ages2)
+
+    # And a tail that parses but is not a valid ENTRY is still torn.
+    root3 = _root()
+    J.declare("u", "task", "x", root=root3)
+    with open(J.path_for("u", root3), "a", encoding="utf-8") as fh:
+        fh.write('{"ts": 1, "field": "not_a_field", "value": "y"}')
+    _v3, _a3, damaged3 = J.read("u", root3)
+    check("a parseable non-entry is refused too", damaged3 == 1, damaged3)
 
 
 def main():
@@ -296,7 +328,7 @@ def main():
               test_a_session_name_cannot_escape_the_journal_directory,
               test_reading_a_session_that_never_declared_is_empty_not_an_error,
               test_a_revoked_decision_does_not_survive_into_the_letter,
-              test_a_write_in_flight_is_not_reported_as_damage):
+              test_a_torn_final_line_is_counted_and_a_complete_one_is_kept):
         t()
     print("\n" + "=" * 64)
     print(f" {'PASS' if not FAILED else 'FAIL'} {RAN - len(FAILED)}/{RAN}"

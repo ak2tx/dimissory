@@ -258,6 +258,77 @@ def test_the_previous_file_is_kept_and_never_overwritten():
           open(b1, encoding="utf-8").read()[:60])
 
 
+def test_a_leftover_backup_name_cannot_cost_the_original():
+    """The case that got past the test above.
+
+    When `<path>.dim-backup` was ALREADY taken -- a leftover from a failed run
+    or a copy the operator made -- the fallback name was stamped to the second
+    with no existence check, and shutil.copy2 overwrote it. Two installs inside
+    one second then left no backup that predated dimissory at all: measured
+    `recoverable pristine original: NONE`. The docstring promised "a name that
+    is never reused" while the code chose one that could be.
+    """
+    d = tempfile.mkdtemp(prefix="dim-leftover-")
+    p = os.path.join(d, "settings.json")
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"theme": "THE ORIGINAL"}, fh)
+    # The reserved name is occupied by something unrelated.
+    with open(p + ".dim-backup", "w", encoding="utf-8") as fh:
+        json.dump({"leftover": "unrelated junk"}, fh)
+
+    for _ in range(3):                     # same second, deliberately
+        I.install("claude", path=p, assume_yes=True, out=lambda *_a: None)
+
+    backups = [os.path.join(d, n) for n in os.listdir(d) if ".dim-backup" in n]
+    pristine = [b for b in backups
+                if "THE ORIGINAL" in open(b, encoding="utf-8").read()
+                and "dim hook" not in open(b, encoding="utf-8").read()]
+    check("the unrelated leftover is not clobbered",
+          "unrelated junk" in open(p + ".dim-backup", encoding="utf-8").read())
+    check("and a backup predating dimissory survives",
+          bool(pristine), f"{len(backups)} backups, none pristine")
+    check("every backup has its own name",
+          len(backups) == len(set(backups)), backups)
+
+
+def test_a_file_edited_while_the_prompt_waits_is_not_silently_reverted():
+    """`merged` is computed BEFORE the operator is asked. Writing it after a
+    yes would revert anything that landed during the question -- an agent
+    editing permissions, the CLI saving a preference -- and the only copy would
+    be a backup nobody knows to look in. Refusing costs one re-run."""
+    d = tempfile.mkdtemp(prefix="dim-toctou-")
+    p = os.path.join(d, "settings.json")
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"theme": "dark"}, fh)
+
+    def meddle_then_agree(_prompt):
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"theme": "dark", "permissions": {"allow": ["Bash"]}}, fh)
+        return "y"
+
+    try:
+        I.install("claude", path=p, ask=meddle_then_agree,
+                  out=lambda *_a: None)
+        check("the concurrent edit is refused, not overwritten", False,
+              "install proceeded and reverted it")
+    except I.InstallRefused as e:
+        check("the concurrent edit is refused, not overwritten", True)
+        check("and the reason says the file changed",
+              "changed while waiting" in str(e), str(e)[:70])
+    check("the edit is still on disk",
+          "permissions" in open(p, encoding="utf-8").read())
+
+    # A file that does NOT change must still install, or this guard has just
+    # broken every normal install.
+    d2 = tempfile.mkdtemp(prefix="dim-toctou2-")
+    p2 = os.path.join(d2, "settings.json")
+    with open(p2, "w", encoding="utf-8") as fh:
+        json.dump({"theme": "dark"}, fh)
+    path, added = I.install("claude", path=p2, ask=lambda _p: "y",
+                            out=lambda *_a: None)
+    check("an untouched file installs normally", bool(added), added)
+
+
 def test_codex_is_not_given_a_turn_end_gate_it_does_not_have():
     """Codex's event registry has no bare Stop. Installing one would put a
     hook in the file that can never fire -- configuration that looks like
@@ -286,6 +357,8 @@ def main():
               test_installing_twice_adds_nothing_the_second_time,
               test_declining_changes_nothing_and_is_not_success,
               test_the_previous_file_is_kept_and_never_overwritten,
+              test_a_leftover_backup_name_cannot_cost_the_original,
+              test_a_file_edited_while_the_prompt_waits_is_not_silently_reverted,
               test_codex_is_not_given_a_turn_end_gate_it_does_not_have):
         t()
     print("\n" + "=" * 66)

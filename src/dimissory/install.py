@@ -108,6 +108,20 @@ def detect():
             for k, v in TARGETS.items()}
 
 
+def _fingerprint(path):
+    """Enough to tell whether the file changed under us. None when absent.
+
+    Content, not mtime: mtime has one-second resolution on some filesystems
+    and an edit inside the same second would be invisible.
+    """
+    try:
+        with open(path, "rb") as fh:
+            import hashlib
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def _block(events, command):
     return {e: [{"hooks": [{"type": "command", "command": command}]}]
             for e in events}
@@ -119,14 +133,43 @@ def _backup(path):
     The predecessor's second install copied its own generated file over the
     first backup, so the operator's original -- the only thing worth keeping --
     was gone after two installs.
+
+    The first version of THIS function reintroduced that, one step further
+    along. It reserved `<path>.dim-backup`, and when that name was already
+    taken it fell back to a name stamped to the SECOND with no existence check
+    at all. Measured: with a leftover `.dim-backup` present and two installs
+    inside one second, the timestamped copy was overwritten by the
+    already-merged file, and no backup on disk was pre-install any more --
+    `recoverable pristine original: NONE`. The docstring promised "a name that
+    is never reused" and the code chose one that could be.
+
+    So the name is now claimed with O_CREAT|O_EXCL, which cannot lose a race
+    with another process or with an earlier copy in the same second, and the
+    counter walks until it finds a name nobody holds.
     """
     if not os.path.exists(path):
         return None
-    first = path + ".dim-backup"
-    dest = first if not os.path.exists(first) else \
-        f"{path}.dim-backup.{time.strftime('%Y%m%dT%H%M%S')}"
-    shutil.copy2(path, dest)
-    return dest
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    candidates = [path + ".dim-backup", f"{path}.dim-backup.{stamp}"]
+    candidates += [f"{path}.dim-backup.{stamp}.{n}" for n in range(1, 1000)]
+    for dest in candidates:
+        try:
+            fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+        os.close(fd)
+        # copyfile, not copy2: the destination already exists (we just claimed
+        # it), and copystat is applied afterwards so the mode we opened with
+        # does not outlive the copy.
+        shutil.copyfile(path, dest)
+        try:
+            shutil.copystat(path, dest)
+        except OSError:
+            pass
+        return dest
+    return None
 
 
 def plan(target, command, path=None):
@@ -202,11 +245,23 @@ def install(target, command=None, path=None, assume_yes=False,
     if os.path.exists(p):
         out(f"    a copy of the current file is kept alongside it")
 
+    before = _fingerprint(p)
     if not assume_yes:
         answer = (ask or input)(f"    proceed? [y/N] ")
         if not str(answer).strip().lower().startswith("y"):
             out("    declined; nothing was changed")
             return None, []
+
+    # The file may have changed while the operator was reading the prompt --
+    # an agent editing permissions, the CLI itself writing a preference, the
+    # user in another window. `merged` was computed BEFORE the question was
+    # asked, so writing it now would silently revert whatever landed in
+    # between, and the only copy of it would be the backup nobody knows to
+    # look in. Refusing costs one re-run; the alternative costs the edit.
+    if _fingerprint(p) != before:
+        raise InstallRefused(
+            f"{p} changed while waiting for an answer. Nothing was written -- "
+            f"run this again to plan against the current file.")
 
     backup = _backup(p)
     os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
