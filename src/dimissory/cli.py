@@ -175,7 +175,17 @@ def cmd_resume(args):
             continue
         if t.startswith("#   expected:"):
             if pending is not None:
-                pairs.append((pending, t.split("expected:", 1)[1].strip()))
+                raw = t.split("expected:", 1)[1].strip()
+                # JSON since the format changed to survive multi-line values.
+                # Older letters carry a bare string, so both are accepted --
+                # a letter written by yesterday's version must still verify.
+                try:
+                    want = json.loads(raw)
+                    if not isinstance(want, str):
+                        want = raw
+                except ValueError:
+                    want = raw
+                pairs.append((pending, want))
                 pending = None
         elif t.startswith("#"):
             continue

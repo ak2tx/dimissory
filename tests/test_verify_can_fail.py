@@ -23,6 +23,7 @@ Run: python3 tests/test_verify_can_fail.py
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -162,7 +163,9 @@ def test_a_check_with_no_recorded_expectation_is_not_a_pass():
     b = Brief(session="s", observed=Observed(head="abc1234"),
               declared=Declared(task="t"),
               checks=(Check("true", "whatever"),))
-    text = render(b).replace("#   expected: whatever", "")   # strip it
+    # The expectation is JSON-encoded now, so strip whatever form it takes.
+    text = "\n".join(l for l in render(b).splitlines()
+                     if not l.startswith("#   expected:"))
     with open(os.path.join(letters, "s-1.md"), "w",
               encoding="utf-8") as fh:
         fh.write(text)
@@ -281,6 +284,107 @@ def test_the_letter_is_plain_ascii():
         check(f"{label} is pure ASCII", not bad, f"non-ASCII: {bad}")
 
 
+def test_git_output_keeps_its_leading_whitespace():
+    """One character, and it corrupted the block a reader is told to trust.
+
+    `_git` ended with `.strip()`. Correct for `rev-parse`; wrong for
+    `git status --porcelain`, where a modified tracked file is " M path" with
+    a SIGNIFICANT leading space. Stripping it shifted every `ln[3:]` by one, so
+    a real letter reported `csvutil.py` as `svutil.py` -- in the Observed
+    block, under a heading promising machine-derived fact.
+    """
+    if not shutil.which("git"):
+        return skip("git output keeps leading whitespace", "no git")
+    from dimissory.observe import _git, observe
+    d = _repo()
+    _git2 = subprocess.run(["git", "-C", d, "add", "a.txt"],
+                           capture_output=True, text=True)
+    _git(d, "commit", "-q", "-m", "x") if False else None
+    subprocess.run(["git", "-C", d, "-c", "user.email=t@t", "-c",
+                    "user.name=t", "commit", "-q", "-m", "add"],
+                   capture_output=True, text=True)
+    with open(os.path.join(d, "a.txt"), "w") as fh:
+        fh.write("modified\n")
+
+    raw = _git(d, "status", "--porcelain")
+    check("a modified file keeps its leading space",
+          raw.startswith(" M"), repr(raw[:20]))
+    o = observe(cwd=d)
+    check("so the path survives intact",
+          o.dirty == ("a.txt",), o.dirty)
+
+
+def test_the_recorded_expectation_is_the_commands_real_output():
+    """`seal` fell back to a DERIVED path list, which does not look like
+    porcelain output and so could never match it. A check that always
+    disagrees is as useless as one that always passes -- and the rule had
+    already been fixed once, at a different call site."""
+    if not shutil.which("git"):
+        return skip("seal records real output", "no git")
+    from dimissory.hook import seal
+    d = _repo()
+    subprocess.run(["git", "-C", d, "-c", "user.email=t@t", "-c",
+                    "user.name=t", "commit", "-q", "-am", "x"],
+                   capture_output=True, text=True)
+    with open(os.path.join(d, "a.txt"), "w") as fh:
+        fh.write("changed\n")
+    letters = os.path.join(d, "letters")
+    path = seal("s-seal", {"cwd": d}, letters_dir=letters)
+    check("a letter was written", bool(path), path)
+    text = open(path, encoding="utf-8").read()
+    want = []
+    for l in text.splitlines():
+        if not l.startswith("#   expected:") or "porcelain" in l:
+            continue
+        try:
+            want.append(json.loads(l.split("expected:", 1)[1].strip()))
+        except ValueError:
+            want.append(l.split("expected:", 1)[1].strip())
+    tree = [w for w in want if "a.txt" in w]
+    # Porcelain FORM, not a specific status. Every line is two status
+    # characters then a space then the path -- " M x", "?? x", "A  x". A bare
+    # path list ("a.txt") has no status column at all, and that is what the
+    # derived fallback produced.
+    porcelain_like = tree and all(
+        len(ln) > 3 and ln[2] == " " for ln in tree[0].splitlines())
+    check("the tree expectation has porcelain's status column, not bare paths",
+          porcelain_like, tree)
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        rc, out = _resume(letters)
+        check("and the letter it wrote actually verifies", rc == 0,
+              f"exit {rc}: {out[-200:]}")
+    finally:
+        os.chdir(cwd)
+
+
+def test_a_multiline_expectation_stays_on_one_line():
+    """It spilled across the verify block, so `resume` -- which reads the
+    single line after each command -- compared against only its first line."""
+    from dimissory.render import render
+    b = Brief(session="s", observed=Observed(head="abc1234"),
+              declared=Declared(task="t"),
+              checks=(Check("git status --porcelain",
+                            " M one.py\n?? two.py\n?? three.py"),))
+    text = render(b)
+    exp = [l for l in text.splitlines() if l.startswith("#   expected:")]
+    check("there is exactly one expectation line", len(exp) == 1, exp)
+    # Guarded. On the un-encoded version this raised and took the file down
+    # instead of reporting one failure -- a negative control that crashes is
+    # a worse signal than one that fails.
+    try:
+        got = json.loads(exp[0].split("expected:", 1)[1].strip()) if exp else None
+    except ValueError:
+        got = None
+    check("and it round-trips to the original value",
+          got == " M one.py\n?? two.py\n?? three.py", (exp or [""])[0][:80])
+    check("no fragment leaked onto its own line",
+          "\n?? two.py\n" not in text.replace("\\n", "\n") or
+          "two.py" in exp[0], "spilled")
+
+
 def main_():
     print("=" * 66)
     print(" the verify block fails when the world moved, or it is decoration")
@@ -292,6 +396,9 @@ def main_():
               test_a_letter_with_no_verify_block_is_refused,
               test_the_exclusion_survives_a_symlinked_working_directory,
               test_checks_run_without_a_shell,
+              test_git_output_keeps_its_leading_whitespace,
+              test_the_recorded_expectation_is_the_commands_real_output,
+              test_a_multiline_expectation_stays_on_one_line,
               test_a_letter_that_is_not_valid_utf8_is_reported_not_raised,
               test_the_letter_is_plain_ascii):
         t()

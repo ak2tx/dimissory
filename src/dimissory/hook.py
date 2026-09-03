@@ -195,9 +195,29 @@ def seal(sid, payload, journal_root=None, letters_dir=None):
     observed = observe(cwd=cwd, transcript=field(payload, "transcript"),
                        our_dirs=ours)
     declared, ages, _damaged = journal.to_declared(sid, root=journal_root)
+    # The expectation must be the command's REAL OUTPUT. Without this the check
+    # fell back to a derived list of paths, which does not look like
+    # `git status --porcelain` output and so could never match it -- a check
+    # that always disagrees is as useless as one that always passes. Review
+    # caught this once already, in cli.py; the rule had not reached here.
+    from .observe import _exclude_pathspec, _git
+    porcelain = None
+    spec = _exclude_pathspec(cwd, *ours)
+    rels = []
+    for d in ours:
+        try:
+            r = os.path.relpath(os.path.realpath(d), os.path.realpath(cwd))
+        except ValueError:
+            continue
+        if not r.startswith(os.pardir) and not os.path.isabs(r):
+            rels.append(f":(exclude){r.replace(os.sep, '/')}")
+    got = _git(cwd, "status", "--porcelain", *(["--", *rels] if rels else []))
+    if isinstance(got, str):
+        porcelain = got
     brief = Brief(session=sid, observed=observed, declared=declared,
                   ages=ages, checks=checks_for(observed, cwd=cwd,
-                                               our_dirs=ours))
+                                               our_dirs=ours,
+                                               porcelain=porcelain))
     os.makedirs(letters, exist_ok=True)
     name = f"{sid[:60]}-{time.strftime('%Y%m%dT%H%M%S')}.md"
     path = os.path.join(letters, name)

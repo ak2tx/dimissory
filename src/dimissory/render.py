@@ -18,6 +18,8 @@ in the predecessor before it was a rule:
 
 from __future__ import annotations
 
+import json
+
 from .brief import Brief, Unmeasured
 
 _ATTRIB = "the agent's own words"
@@ -131,7 +133,12 @@ def render(brief: Brief) -> str:
             if c.why:
                 parts.append(f"# {c.why}")
             parts.append(c.command)
-            parts.append(f"#   expected: {c.expect}")
+            # A multi-line expectation breaks the one-line `#   expected:`
+            # form: it spilled across the block, and `resume` -- which reads
+            # the single line after each command -- compared against only its
+            # first line. Encoded as JSON so it is exactly one line, always
+            # parseable, and unambiguous about trailing whitespace.
+            parts.append(f"#   expected: {json.dumps(c.expect)}")
         parts += ["```", ""]
 
     if not d.is_empty():

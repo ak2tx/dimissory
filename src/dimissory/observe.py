@@ -37,7 +37,12 @@ def _git(cwd, *args):
         # Not a repository, a detached worktree with no commits, a permission
         # problem -- all of them are "we do not know", none of them are a value.
         return UNMEASURED
-    return p.stdout.strip()
+    # rstrip, NOT strip. Leading whitespace is SIGNIFICANT in porcelain output:
+    # a modified tracked file is " M path" with a leading space, and stripping
+    # it shifted every subsequent slice by one character. Measured on a real
+    # session: `csvutil.py` was reported as `svutil.py`, in the block a reader
+    # is meant to trust as machine-derived fact.
+    return p.stdout.rstrip("\n").rstrip() if p.stdout.strip() else ""
 
 
 def observe(cwd=None, transcript=None, window=None, session_started=None,
