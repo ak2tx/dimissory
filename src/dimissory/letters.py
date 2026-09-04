@@ -54,8 +54,58 @@ def claim(directory, session, when=None):
     return None
 
 
+def _body(text):
+    """A letter's content, minus the line that always differs.
+
+    Every letter opens with "Issued by dimissory at <timestamp>", so two
+    letters describing an identical world are never byte-identical. Comparing
+    the rest is what makes "has anything changed?" answerable.
+    """
+    return "\n".join(line for line in (text or "").splitlines()
+                     if not line.startswith("Issued by dimissory at "))
+
+
+def latest_for(directory, session):
+    """The newest letter for this session, or None."""
+    prefix = f"{str(session)[:60]}-"
+    try:
+        names = [f for f in os.listdir(directory)
+                 if f.startswith(prefix) and f.endswith(".md")]
+    except OSError:
+        return None
+    if not names:
+        return None
+    return os.path.join(directory, sorted(names)[-1])
+
+
 def write(directory, session, text, when=None):
-    """Claim a name and write `text` into it. Returns the path, or None."""
+    """Claim a name and write `text` into it. Returns the path, or None.
+
+    A LETTER IDENTICAL TO THE LAST ONE IS NOT WRITTEN. Measured: one short
+    Codex session produced FOUR letters. The margin guard was working
+    correctly -- PostToolUse sealed exactly once -- but PreCompact and
+    SessionEnd seal unconditionally, by design, because they are the
+    last-chance events and a letter at compaction matters even when the window
+    is nowhere near full.
+
+    Special-casing those two events would have been the obvious fix and the
+    wrong one: it would trade duplicate letters for missing ones. The real
+    rule does not mention events at all. If the document we are about to write
+    says exactly what the last one said, writing it adds nothing and buries
+    the letter that matters under copies of itself.
+
+    Returns the EXISTING path in that case, so a caller can still tell the
+    agent where its letter is -- suppressing the write must not look like a
+    failure to seal.
+    """
+    previous = latest_for(directory, session)
+    if previous:
+        try:
+            with open(previous, encoding="utf-8") as fh:
+                if _body(fh.read()) == _body(text):
+                    return previous
+        except OSError:
+            pass
     path = claim(directory, session, when)
     if path is None:
         return None

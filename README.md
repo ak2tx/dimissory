@@ -118,6 +118,7 @@ deliberately no exit code meaning "probably fine".
 | Seal before the wall, on the tool-call heartbeat | working |
 | `dim status` | working |
 | Observed block — last command and exit code | not yet |
+| One letter per session unless something changed | working |
 | Pruning old letters (`letters.keep`) | not yet, setting is inert |
 | Codex hooks | installed, but inert until Codex trusts them |
 | Cross-account delivery | not yet |

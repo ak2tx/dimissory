@@ -169,9 +169,22 @@ def test_the_refresh_interval_is_honoured():
     H.handle(args, journal_root=jr, letters_dir=letters)
     check("an immediate second call does not reseal",
           len(_letters(letters)) == first, _letters(letters))
+
+    # Past the interval with NOTHING changed, there is still nothing to say,
+    # so no letter is written. The interval permits a refresh; it does not
+    # manufacture one.
     time.sleep(1.3)
     H.handle(args, journal_root=jr, letters_dir=letters)
-    check("once the interval passes, the letter is refreshed",
+    check("past the interval with nothing new, still one letter",
+          len(_letters(letters)) == first, _letters(letters))
+
+    # Give it something new, and the refresh happens.
+    from dimissory import journal as _J
+    _J.declare("refresh", "next", "something that was not there before",
+               root=jr)
+    time.sleep(1.05)
+    H.handle(args, journal_root=jr, letters_dir=letters)
+    check("once there is something new, the letter is refreshed",
           len(_letters(letters)) > first, _letters(letters))
 
 
@@ -261,18 +274,33 @@ def test_two_seals_in_the_same_second_do_not_overwrite_each_other():
     overwriting -- or being overwritten by -- the degraded one it was meant to
     replace, while the seal marker recorded the upgrade as done.
     """
+    # THE NAMING RACE, tested where it lives. Six claims in one second must
+    # yield six distinct names -- proving that through `seal` meant writing six
+    # identical letters, which now correctly collapse to one, so the two
+    # properties were being measured through each other.
+    from dimissory import letters as _L
     d, jr, letters = _bed()
-    roll = _rollout(d)
+    names = [_L.claim(letters, "same-second") for _ in range(6)]
+    check("six claims inside one second yield six distinct names",
+          len(set(names)) == 6, names)
+    check("and each one exists, so nobody can take it",
+          all(n and os.path.exists(n) for n in names), names)
+    check("their names sort chronologically",
+          [os.path.basename(n) for n in names]
+          == sorted(os.path.basename(n) for n in names), names)
+
+    # THE CONTENT RULE, tested separately: six seals of an unchanged world are
+    # one letter, and all six report the same path rather than a failure.
+    d2, jr2, letters2 = _bed()
+    roll = _rollout(d2)
     payload = {"hook_event_name": "PostToolUse", "session_id": "same-second",
-               "transcript_path": roll, "cwd": d}
-    paths = [H.seal("same-second", payload, jr, letters) for _ in range(6)]
-    check("six seals inside one second produce six letters",
-          len(set(paths)) == 6 and len(_letters(letters)) == 6,
-          f"{len(set(paths))} unique names, {len(_letters(letters))} files")
-    check("and every one of them is non-empty",
-          all(os.path.getsize(p) > 0 for p in paths))
-    check("no seal returned the same path twice",
-          len(paths) == len(set(paths)), paths)
+               "transcript_path": roll, "cwd": d2}
+    paths = [H.seal("same-second", payload, jr2, letters2) for _ in range(6)]
+    check("six seals of an unchanged world are one letter",
+          len(_letters(letters2)) == 1, _letters(letters2))
+    check("and every one reports where that letter is",
+          len(set(paths)) == 1 and all(p for p in paths), paths)
+    check("which is non-empty", os.path.getsize(paths[0]) > 0)
 
 
 def test_the_hook_seals_where_dim_show_will_actually_look():
@@ -314,6 +342,78 @@ def test_the_hook_seals_where_dim_show_will_actually_look():
     check("and not in the hardcoded default", stray == [], stray)
 
 
+def test_one_session_produces_one_letter_unless_something_changed():
+    """Measured on a real Codex run: FOUR letters for one short session.
+
+    The margin guard was working -- PostToolUse sealed exactly once -- but
+    PreCompact and SessionEnd seal unconditionally, by design, because they
+    are the last-chance events and a letter at compaction matters even when
+    the window is nowhere near full.
+
+    Special-casing those two events would have been the obvious fix and the
+    wrong one: it trades duplicate letters for missing ones. The rule that
+    works mentions no events at all -- a letter identical to the last one is
+    not written, because it says nothing new and buries the letter that
+    matters under copies of itself.
+    """
+    from dimissory import journal
+
+    d, jr, letters = _bed()
+    roll = _rollout(d)
+    fired = ["SessionStart", "PostToolUse", "PostToolUse", "PostToolUse",
+             "PreCompact", "SessionEnd"]
+    for event in fired:
+        H.handle({"hook_event_name": event, "session_id": "one",
+                  "transcript_path": roll, "cwd": d},
+                 journal_root=jr, letters_dir=letters)
+    check(f"{len(fired)} events, one unchanged world, one letter",
+          len(_letters(letters)) == 1, _letters(letters))
+
+    # The last-chance events must still SEAL -- suppressing a duplicate is not
+    # the same as declining to write. Nothing sealed before them means they do.
+    d2, jr2, letters2 = _bed()
+    roll2 = _rollout(d2, used=40.0)          # under the margin: no early seal
+    H.handle({"hook_event_name": "PostToolUse", "session_id": "two",
+              "transcript_path": roll2, "cwd": d2},
+             journal_root=jr2, letters_dir=letters2)
+    check("under the margin, nothing is sealed yet", _letters(letters2) == [])
+    H.handle({"hook_event_name": "SessionEnd", "session_id": "two",
+              "transcript_path": roll2, "cwd": d2},
+             journal_root=jr2, letters_dir=letters2)
+    check("but SessionEnd still seals one", len(_letters(letters2)) == 1,
+          _letters(letters2))
+
+    # And a letter whose CONTENT changed is always written.
+    d3, jr3, letters3 = _bed()
+    roll3 = _rollout(d3)
+    H.handle({"hook_event_name": "PostToolUse", "session_id": "three",
+              "transcript_path": roll3, "cwd": d3},
+             journal_root=jr3, letters_dir=letters3)
+    first = _letters(letters3)
+    journal.declare("three", "task", "the agent finally said something",
+                    root=jr3)
+    time.sleep(1.05)
+    H.handle({"hook_event_name": "SessionEnd", "session_id": "three",
+              "transcript_path": roll3, "cwd": d3},
+             journal_root=jr3, letters_dir=letters3)
+    after = _letters(letters3)
+    check("a changed letter IS written", len(after) == len(first) + 1, after)
+    body = open(os.path.join(letters3, sorted(after)[-1]),
+                encoding="utf-8").read()
+    check("and it carries what changed",
+          "finally said something" in body, body[:120])
+
+    # The dedupe must not be defeated by the timestamp line, which always
+    # differs -- that is the whole reason it is stripped before comparing.
+    from dimissory import letters as _L
+    a = "Issued by dimissory at 2026-01-01 00:00:00.\nHEAD abc\n"
+    b = "Issued by dimissory at 2099-12-31 23:59:59.\nHEAD abc\n"
+    check("two letters differing only in their issue time are the same letter",
+          _L._body(a) == _L._body(b), (_L._body(a), _L._body(b)))
+    check("and one differing in substance is not",
+          _L._body(a) != _L._body(b.replace("abc", "def")))
+
+
 def test_below_the_margin_nothing_is_sealed_at_all():
     d, jr, letters = _bed()
     roll = _rollout(d, used=40.0)
@@ -348,6 +448,7 @@ def main():
               test_grace_upgrades_a_degraded_letter_when_the_agent_finally_declares,
               test_two_seals_in_the_same_second_do_not_overwrite_each_other,
               test_the_hook_seals_where_dim_show_will_actually_look,
+              test_one_session_produces_one_letter_unless_something_changed,
               test_below_the_margin_nothing_is_sealed_at_all,
               test_a_bad_interval_does_not_become_zero):
         t()
