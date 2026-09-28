@@ -152,7 +152,7 @@ def dim_command():
             return _quote(found)
     # Always correct, even from a source checkout with nothing installed --
     # and quoted, because the default Windows install lives under a path with
-    # a space in it ("C:\\Program Files\\..."), where an unquoted command line
+    # a space in it ("C:\Program Files\..."), where an unquoted command line
     # splits into a first word that is not an interpreter.
     return f"{_quote(sys.executable)} -m dimissory.cli"
 

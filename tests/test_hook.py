@@ -146,9 +146,19 @@ def test_the_command_the_ask_emits_actually_runs():
     # runner: measuring the developer's machine rather than the code.
     real = real.replace(H.dim_command(),
                         f"{sys.executable} -m dimissory.cli", 1)
-    p = subprocess.run(["/bin/sh", "-c", real], capture_output=True, text=True,
-                       env={**os.environ,
-                            "PYTHONPATH": os.path.join(ROOT, "src")})
+    # Through the shell the HOST would use. `/bin/sh` does not exist on
+    # Windows, and this test never got that far there until the journal test
+    # ahead of it stopped failing -- a FileNotFoundError from Popen, not a
+    # verdict about the command.
+    def _sh(command):
+        env = {**os.environ, "PYTHONPATH": os.path.join(ROOT, "src")}
+        if os.name == "nt":
+            return subprocess.run(command, shell=True, capture_output=True,
+                                  text=True, env=env)
+        return subprocess.run(["/bin/sh", "-c", command], capture_output=True,
+                              text=True, env=env)
+
+    p = _sh(real)
     check("the emitted command exits 0", p.returncode == 0,
           f"rc={p.returncode} {(p.stderr or '')[:100]}")
     values, _a, _d = J.read("runme", root)
@@ -157,10 +167,7 @@ def test_the_command_the_ask_emits_actually_runs():
 
     # The negative control: the ordering that was shipped must genuinely fail.
     broken = real.replace("--journal", "XX", 1).replace("declare", "declare --journal", 1)
-    b = subprocess.run(["/bin/sh", "-c", broken.replace("XX", "", 1)],
-                       capture_output=True, text=True,
-                       env={**os.environ,
-                            "PYTHONPATH": os.path.join(ROOT, "src")})
+    b = _sh(broken.replace("XX", "", 1))
     check("while --journal AFTER the subcommand is rejected",
           b.returncode == 64, f"rc={b.returncode}")
 
