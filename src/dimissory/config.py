@@ -60,7 +60,7 @@ DEFAULTS = {
     },
 }
 
-TEMPLATE = '''\\
+TEMPLATE = '''\
 # dimissory -- settings
 #
 # Everything here has a working default; delete a line to go back to it.
@@ -151,8 +151,8 @@ def write_at(cfg, default=0.85):
 def _toml_str(value):
     """A TOML basic string that survives a Windows path.
 
-    `dim setup` on Windows wrote `dir = "C:\\\\Users\\\\me\\\\..."` with the
-    backslashes raw. `\\\\U` is a unicode escape in a TOML basic string, so the
+    `dim setup` on Windows wrote `dir = "C:\\Users\\me\\..."` with the
+    backslashes raw. `\\U` is a unicode escape in a TOML basic string, so the
     tool could not parse the config it had just written -- and fell back to
     defaults while the operator's file sat there looking used. A wrong location
     reported as success, which is the defect this project inherited a whole file
@@ -162,8 +162,8 @@ def _toml_str(value):
     string has no escape at all and would break on a path containing a quote.
     """
     out = str(value)
-    for bad, good in (("\\\\", "\\\\\\\\"), ('"', '\\\\"'),
-                      ("\\n", "\\\\n"), ("\\r", "\\\\r"), ("\\t", "\\\\t")):
+    for bad, good in (("\\", "\\\\"), ('"', '\\"'),
+                      ("\n", "\\n"), ("\r", "\\r"), ("\t", "\\t")):
         out = out.replace(bad, good)
     return out
 

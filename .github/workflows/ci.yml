@@ -30,6 +30,8 @@ jobs:
         run: python tests/test_hook.py
       - name: the plan-window meter
         run: python tests/test_window.py
+      - name: the receiving side -- the next session is handed the letter
+        run: python tests/test_pickup.py
 
   package:
     runs-on: ubuntu-latest

@@ -52,6 +52,31 @@ refuses to report a reading it cannot date.
 
 That is the part a competitor cannot skip, and it is the next thing to port.
 
+## Delivery is part of the contract
+
+A letter nobody reads transfers nothing. The receiving side is `hook._pickup`:
+at session start, the newest letter written in the current directory is found
+(`letters.latest_for_cwd`, matching on the `cwd` the Observed block records),
+its Verify block is run (`verify.run`), and letter plus verdict are handed to
+the session as context. The verdict is delivered alongside, never used to
+withhold: a stale letter's Decided and Ruled out are still the previous
+session's words, and the reader is told which check moved.
+
+Three rules hold here too:
+
+**A letter is matched to a directory it recorded, or not at all.** Handing a
+session the newest letter from anywhere means handing it another project's
+plan. A letter with no `cwd` line is never picked up automatically.
+
+**Once per session per letter.** A newer letter -- sealed at PreCompact -- is
+delivered again after the restart. A session's own letter is never read back
+to it on a prompt.
+
+**The pointer, not the copy.** The letter names the project's guide files
+(`CLAUDE.md`, `AGENTS.md`, `README.md`) and tells the reader to open them. It
+does not copy them: each CLI reads only its own, so the letter's job is to say
+the others exist.
+
 ## The test that settles whether this is a product
 
 Ten real interrupted tasks producing letters, and five resumed successfully from

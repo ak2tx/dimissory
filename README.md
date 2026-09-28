@@ -14,11 +14,11 @@ the work instead of reconstructing it. On another account, or another model.
 pip install dimissory
 ```
 
-> **Status: early, `0.0.6`.** The brief format, the trust contract, the verify
-> mechanism, the agent hooks and the plan-window meter all work and are tested
-> — 561 checks across 10 files, green from a bare checkout with nothing
-> installed. Two vendors need a second step before anything is automatic, and
-> `dim status` exits non-zero until they have it: Claude needs
+> **Status: early, `0.0.9`.** The brief format, the trust contract, the verify
+> mechanism, the agent hooks, the plan-window meter and the pickup on the
+> receiving side all work and are tested — green from a bare checkout with
+> nothing installed. Two vendors need a second step before anything is
+> automatic, and `dim status` exits non-zero until they have it: Claude needs
 > `dim statusline --install`, and Codex needs you to approve its hooks once.
 > Both are listed under [Known gaps](#known-gaps-stated-plainly).
 
@@ -89,11 +89,13 @@ documented all of them correctly and shipped the opposite anyway.
 ## Use
 
 ```bash
+dim setup                 # once: hooks for every agent CLI found, config, a proof letter
 dim meter                 # how much of every plan window is gone
 dim write                 # issue a letter now
 dim show                  # print the most recent one
 dim resume                # run its Verify block; exit 2 if stale
-dim status                # how much of the plan window is gone
+dim pickup                # print AND verify the letter for this directory
+dim status                # is anything going to seal before a window closes?
 ```
 
 `dim` and `dimissory` are the same command. Letters land in
@@ -103,25 +105,79 @@ dim status                # how much of the plan window is gone
 agreed, the letter may be acted on. **Exit 2**: it is stale. There is
 deliberately no exit code meaning "probably fine".
 
+## Handing off to another model
+
+This is the loop the tool exists for, end to end, with nothing typed twice:
+
+1. **You work in Claude Code**, in `~/proj`. The hook asks the agent to
+   declare as it goes: what the task is, what it has done, what it decided,
+   what it ruled out, what it learned about the codebase, and the exact next
+   action. Each is one `dim declare` call, and the agent runs them itself.
+2. **The five-hour cap approaches.** At 85% of the window (`dim meter` shows
+   it; `write_at` sets it) the hook seals a letter into `~/.dimissory/letters`.
+   It records the directory, the branch, the commit, the dirty paths, which
+   guide files the project has (`CLAUDE.md`, `AGENTS.md`, `README.md`), and
+   everything the agent declared — plus a Verify block that can prove the
+   letter is still true.
+3. **You open Codex, or Claude on another account, in the same `~/proj`.**
+   Its SessionStart hook finds the newest letter for that directory, runs the
+   Verify block, and hands the new session the letter with the verdict:
+
+   ```
+   dimissory: a handoff letter for this directory was sealed 4m ago by a
+   claude session (abc123). Its Verify block holds (3 check(s) agreed), so
+   the world has not moved since it was written. Continue from it instead of
+   reconstructing: take its Next action as your starting point, read the
+   project guides it lists under Observed before touching code, and do not
+   redo what it lists under Done. ...
+   ----- begin letter -----
+   # Dimissory letter: abc123
+   ...
+   ```
+
+   The new model continues from *Next action* without being told what the
+   project is. If the world moved — you committed, you switched branch — the
+   verdict says `STALE` and names the check that disagreed, and the letter is
+   still delivered because *Decided* and *Ruled out* are still worth having.
+4. **It is delivered once per session per letter.** A session restarting
+   after `/compact` is handed the letter PreCompact just sealed; a session is
+   never handed its own letter back on every prompt. `pickup.max_age` (a
+   week) is the only age limit; the Verify block, not the clock, decides
+   whether a letter is still true.
+
+Two things this does not do. It does not carry the letter to **another
+machine** — for that, `dim show` and paste; the `Resume` section at the bottom
+of every letter is the prompt. And on **Grok**, which ignores SessionStart
+context, it is `dim pickup` by hand: the same letter and the same verdict,
+printed for you to paste.
+
+```bash
+dim pickup                # in the project directory: the letter, then its verdict
+dim pickup path/to.md     # a specific one, wherever it came from
+```
+
 ## What is built
 
 | Piece | State |
 |---|---|
 | Brief model and trust contract | working, 32 checks |
 | Markdown renderer | working |
-| Observed block — git, dirty paths | working |
+| Observed block — git, branch, dirty paths, directory, guide files | working |
+| Declared block — task, done, decided, ruled out, learned, next, constraints | working |
 | Verify block — derive, render, compare, fail | working |
 | Transcript reading — bounded tail, hashed args | working |
 | Agent hooks — install, ask, gate | working, all three CLIs |
 | Plan-window meter — Codex, Grok | working, both caps |
 | Plan-window meter — Claude | working, via `dim statusline` |
 | Seal before the wall, on the tool-call heartbeat | working |
+| **Pickup — the next session in the directory is handed the letter, verified** | working, Claude and Codex; Grok by hand |
+| `dim pickup`, `dim resume` scoped to the directory you are in | working |
 | `dim status` | working |
 | Observed block — last command and exit code | not yet |
 | One letter per session unless something changed | working |
 | Pruning old letters (`letters.keep`) | not yet, setting is inert |
 | Codex hooks | installed, but inert until Codex trusts them |
-| Cross-account delivery | not yet |
+| Delivery to another machine | by hand: `dim show`, paste the letter |
 
 ### Claude needs one extra step, and it is not optional
 
@@ -207,6 +263,12 @@ it means nothing here forces the agent to write its half. The journal
 narrows the problem by collecting declarations as work happens instead of
 asking for everything at the end. It does not close it.
 
+**Pickup is also a request.** The letter arrives as context at session
+start, the same channel as the ask, and the same measurement applies: Claude
+Code and Codex acted on it every time it was tried; Grok ignores it. A model
+can still read the letter and reconstruct anyway. What pickup removes is the
+step where a person has to remember the letter exists.
+
 ## How this loses
 
 Stated here rather than in a postmortem, because the predecessor's credibility
@@ -233,6 +295,7 @@ python3 tests/test_contract.py          # the trust contract
 python3 tests/test_setup_and_config.py  # setup, settings, and the -c flag
 python3 tests/test_declared_floor.py    # the Python version we claim to support
 python3 tests/test_verify_can_fail.py   # the verify block detects a moved world
+python3 tests/test_pickup.py            # the next session is handed the letter
 ```
 
 No dependencies and no test runner. Requires Python 3.11+ (`tomllib`).
