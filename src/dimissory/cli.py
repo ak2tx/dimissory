@@ -3,6 +3,8 @@
     dim write     issue a letter now
     dim show      print the most recent letter
     dim resume    run a letter's Verify block and report whether it still holds
+    dim pickup    verify AND print the letter for this directory: the
+                  receiving side of a handoff, by hand
     dim status    how much of the plan window is gone
 
 `dim` and `dimissory` are the same command.
@@ -13,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import subprocess
 import sys
 
@@ -150,16 +151,49 @@ def cmd_show(args):
     return 0
 
 
-def cmd_resume(args):
+def _letter_here(d, cwd=None):
+    """The newest letter written in `cwd`, or None. Never another project's."""
+    from . import letters as _L
+    return _L.latest_for_cwd(d, cwd or os.getcwd())
+
+
+def cmd_resume(args, show=False):
     """Run the Verify block and say plainly whether the letter still holds.
 
     Exit 0 means every check agreed and the letter may be acted on. Exit 2
     means it is stale. There is deliberately no exit code that means "probably
     fine" -- the point of a verify block is that it answers.
+
+    Which letter: the path given, else the newest one written IN THIS
+    DIRECTORY, else the newest one anywhere. The middle step is what makes
+    `dim resume` answer about the project you are standing in rather than
+    about whichever project sealed a letter most recently.
+
+    With `show`, the letter itself is printed first -- that is `dim pickup`,
+    the receiving side of a handoff done by hand, for a host whose hook does
+    not deliver it (Grok ignores SessionStart context) or a person who wants
+    to read it before an agent does.
+
+    The comparison itself lives in verify.py, one owner, because the pickup
+    hook needs the same answer at session start. The expectation is
+    load-bearing: the first version compared nothing and asked only whether
+    the command exited 0. `git rev-parse --short HEAD` exits 0 in ANY
+    repository, so a letter written at one commit reported "still holds" at
+    another -- the verify block, the entire differentiator, could not fail
+    for the reason it exists. Found in review, reproduced in seconds.
     """
-    p = args.path or _latest(_letters_dir(args))
+    d = _letters_dir(args)
+    p = args.path or _letter_here(d)
+    if not p and not show:
+        p = _latest(d)
     if not p or not os.path.exists(p):
-        print("no letter found", file=sys.stderr)
+        if show and not args.path:
+            print(f"no letter records this directory ({os.getcwd()}).\n"
+                  f"  `dim show` prints the most recent letter from any "
+                  f"directory; `dim pickup <path>` verifies a specific one.",
+                  file=sys.stderr)
+        else:
+            print("no letter found", file=sys.stderr)
         return 1
     text, why = _read_letter(p)
     if text is None:
@@ -167,95 +201,45 @@ def cmd_resume(args):
         return 2
     if why:
         print(f"{p}: WARNING -- {why}", file=sys.stderr)
-    if "## Verify first" not in text:
+    if show:
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
+        print(f"---- verifying {p} ----")
+
+    # The checks run where the letter was WRITTEN, when that directory still
+    # exists. `git rev-parse` in whatever directory the reader happens to be
+    # standing in answers a question the letter never asked.
+    from . import letters as _L
+    from . import verify as _V
+    recorded = _L.meta(p).get("cwd")
+    cwd = recorded if recorded and os.path.isdir(recorded) else None
+    if cwd and not _L._same_dir(cwd, os.getcwd()):
+        print(f"  checks run in {cwd} (recorded in the letter)")
+
+    v = _V.run(text, cwd=cwd)
+    if v.status == _V.UNVERIFIABLE:
         print(f"{p}: UNVERIFIABLE -- this letter carries no checks.",
               file=sys.stderr)
         return 2
-    block = text.split("## Verify first", 1)[1].split("```")[1]
-
-    # Parse `command` followed by its `#   expected:` line. The expectation is
-    # load-bearing: the first version compared nothing and asked only whether
-    # the command exited 0. `git rev-parse --short HEAD` exits 0 in ANY
-    # repository, so a letter written at one commit reported "still holds" at
-    # another -- the verify block, the entire differentiator, could not fail
-    # for the reason it exists. Found in review, reproduced in seconds.
-    pairs, pending = [], None
-    for ln in block.splitlines():
-        t = ln.strip()
-        if not t:
-            continue
-        if t.startswith("#   expected:"):
-            if pending is not None:
-                raw = t.split("expected:", 1)[1].strip()
-                # JSON since the format changed to survive multi-line values.
-                # Older letters carry a bare string, so both are accepted --
-                # a letter written by yesterday's version must still verify.
-                try:
-                    want = json.loads(raw)
-                    if not isinstance(want, str):
-                        want = raw
-                except ValueError:
-                    want = raw
-                pairs.append((pending, want))
-                pending = None
-        elif t.startswith("#"):
-            continue
-        else:
-            pending = t
-    if pending is not None:
-        pairs.append((pending, None))
-
-    if not pairs:
+    if v.status == _V.UNPARSEABLE:
         print(f"{p}: no checks could be parsed from the Verify block.",
               file=sys.stderr)
         return 2
-
-    stale = 0
-    for cmd, expect in pairs:
-        try:
-            # NO SHELL. Two reasons, and both were live.
-            #
-            # Portability: the tree check carries a git pathspec,
-            # `-- ':(exclude)letters'`. cmd.exe does not strip single quotes,
-            # so on Windows git received the quotes literally and the exclusion
-            # silently did nothing. shlex.split gives the same argv everywhere.
-            #
-            # Safety: a letter is a portable document that arrives from another
-            # machine, and `resume` executes what is written in it. Review's
-            # words: keep executable verify content machine-generated. Running
-            # it through a shell adds redirection, chaining and expansion to
-            # anything that ever reaches this block.
-            argv = shlex.split(cmd)
-            if not argv:
-                print(f"  FAIL  {cmd}\n          unparseable command")
-                stale += 1
-                continue
-            r = subprocess.run(argv, capture_output=True, text=True,
-                               timeout=30)
-            got = (r.stdout or "").strip()
-            ran = r.returncode == 0
-        except (OSError, subprocess.SubprocessError) as e:
-            got, ran = str(e), False
-        if not ran:
-            ok, why = False, "command failed"
-        elif expect is None:
-            # No recorded expectation means nothing to compare against. That is
-            # NOT a pass -- it is a check that cannot fail, and saying so is the
-            # whole point of this tool.
-            ok, why = False, "no recorded expectation to compare against"
-        else:
-            ok = got == expect.strip()
-            why = "" if ok else f"expected {expect.strip()!r}, got {got!r}"
+    for cmd, ok, reason in v.results:
         print(f"  {'ok  ' if ok else 'FAIL'}  {cmd}"
-              + (f"\n          {why}" if why else ""))
-        stale += 0 if ok else 1
-
-    if stale:
-        print(f"\n{p} is STALE: {stale} of {len(pairs)} check(s) disagree. "
+              + (f"\n          {reason}" if reason else ""))
+    if not v.holds:
+        print(f"\n{p} is STALE: {v.stale} of {v.total} check(s) disagree. "
               f"Re-derive before continuing.", file=sys.stderr)
         return 2
-    print(f"\n{p} still holds ({len(pairs)} check(s) agreed).")
+    print(f"\n{p} still holds ({v.total} check(s) agreed).")
     return 0
+
+
+def cmd_pickup(args):
+    """`dim pickup` -- the letter for this directory, printed and verified."""
+    return cmd_resume(args, show=True)
 
 
 def cmd_declare(args):
@@ -265,8 +249,10 @@ def cmd_declare(args):
     wrote = []
     for field, values in (("task", [args.task] if args.task else []),
                           ("next", [args.next] if args.next else []),
+                          ("done", args.done or []),
                           ("decided", args.decided or []),
                           ("ruled_out", args.ruled_out or []),
+                          ("learned", args.learned or []),
                           ("constraint", args.constraint or []),
                           (_J.REVOKE, args.revoke or [])):
         for v in values:
@@ -305,7 +291,8 @@ def cmd_declare(args):
                 return 1
     if not wrote:
         print("dim declare: nothing to record. Pass at least one of "
-              "--task/--next/--decided/--ruled-out/--constraint/--revoke",
+              "--task/--next/--done/--decided/--ruled-out/--learned/"
+              "--constraint/--revoke",
               file=sys.stderr)
         return 1
     print(f"recorded {len(wrote)}: {', '.join(sorted(set(wrote)))}")
@@ -725,6 +712,11 @@ def main(argv=None):
     r = sub.add_parser("resume", help="verify a letter still holds")
     r.add_argument("path", nargs="?"); r.set_defaults(fn=cmd_resume)
 
+    pk = sub.add_parser("pickup",
+                        help="print AND verify the letter for this directory "
+                             "-- the receiving side of a handoff")
+    pk.add_argument("path", nargs="?"); pk.set_defaults(fn=cmd_pickup)
+
     mt = sub.add_parser("meter",
                         help="how much of every plan window is gone")
     mt.add_argument("--no-refresh", action="store_true",
@@ -745,9 +737,14 @@ def main(argv=None):
     dc.add_argument("--session")
     dc.add_argument("--task", help="what this session is for (replaces)")
     dc.add_argument("--next", help="the exact next action (replaces)")
+    dc.add_argument("--done", action="append",
+                    help="a piece of work finished (accumulates)")
     dc.add_argument("--decided", action="append", help="a decision (accumulates)")
     dc.add_argument("--ruled-out", action="append", dest="ruled_out",
                     help="a dead end and why (accumulates)")
+    dc.add_argument("--learned", action="append",
+                    help="a fact about this codebase the next session would "
+                         "otherwise rediscover (accumulates)")
     dc.add_argument("--constraint", action="append",
                     help="a standing constraint (accumulates)")
     dc.add_argument("--revoke", action="append",

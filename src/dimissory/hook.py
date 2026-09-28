@@ -42,6 +42,23 @@ WHAT THIS STILL DOES NOT DO: make the CONTENT good. A gate can require that
 reading. Both external reviews said the journal mitigates the compliance
 problem rather than fixing it, and a gate narrows it further without closing
 it.
+
+A THIRD MECHANISM, on the receiving side:
+
+  PICKUP  SessionStart looks for the newest letter written IN THIS DIRECTORY,
+          runs its Verify block, and hands the letter plus the verdict to the
+          new session as additionalContext. Once per session per letter; a
+          newer letter (sealed at PreCompact, say) is delivered again after
+          the compaction restart.
+
+This is the half that was missing. Everything above gets a letter WRITTEN
+before the window closes; nothing got it READ. The letter sat in
+~/.dimissory/letters for a person to remember, find, and paste -- so on the
+next model or the next account, the project got explained from scratch
+anyway. Delivery is what makes "continue, don't reconstruct" happen without
+anyone doing anything, and it rides the same SessionStart ask that was
+measured to work on Claude Code and Codex. Grok ignores SessionStart context,
+so there it is `dim pickup` by hand.
 """
 
 from __future__ import annotations
@@ -135,7 +152,7 @@ def dim_command():
             return _quote(found)
     # Always correct, even from a source checkout with nothing installed --
     # and quoted, because the default Windows install lives under a path with
-    # a space in it ("C:\Program Files\..."), where an unquoted command line
+    # a space in it ("C:\\Program Files\\..."), where an unquoted command line
     # splits into a first word that is not an interpreter.
     return f"{_quote(sys.executable)} -m dimissory.cli"
 
@@ -210,9 +227,29 @@ ASK = (
     "action>\"\n"
     "It records a handoff so work survives this session's plan window closing. "
     "Run it now, and run it again with an updated --next whenever the next "
-    "action changes. You may also add --decided \"...\" or --ruled-out "
-    "\"...\" as you go."
+    "action changes. As you go, also add --done \"...\" for each piece "
+    "finished, --decided \"...\", --ruled-out \"...\", and --learned "
+    "\"...\" for any fact about this codebase the next session would "
+    "otherwise have to rediscover."
 )
+
+# The receiving side. Leads with what it is and what to do with it, then the
+# letter verbatim, because a pointer to a file is one more step an agent on a
+# small task will skip -- the same lesson ASK records about menus.
+PICKUP = (
+    "dimissory: a handoff letter for this directory was sealed {age} ago by "
+    "{who}. {verdict} Continue from it instead of reconstructing: take its "
+    "Next action as your starting point, read the project guides it lists "
+    "under Observed before touching code, and do not redo what it lists under "
+    "Done. Its Task, Done, Decided, Ruled out, Learned and Next action are "
+    "the previous session's own words; the Observed block is machine-derived. "
+    "The full letter is at {path}.\n"
+    "----- begin letter -----\n{text}\n----- end letter -----"
+)
+
+# How much of a letter is handed over inline. A letter is a page; anything
+# past this is an agent that declared a novel, and the path is given anyway.
+PICKUP_MAX_CHARS = 12_000
 
 GATE = (
     "This session has recorded nothing for its handoff letter, so if the "
@@ -281,6 +318,108 @@ def _number(value, fallback):
     return value if isinstance(value, (int, float)) else fallback
 
 
+def _safe_name(sid):
+    """A session id as a filename. It comes from a payload; it is not a path."""
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(sid))
+    return (safe[:60] or "session").strip(".") or "session"
+
+
+def _pickup_marker_path(sid, journal_root):
+    root = os.path.expanduser(journal_root or journal.default_root())
+    return os.path.join(root, ".pickedup", f"{_safe_name(sid)}.json")
+
+
+def _picked_up(sid, journal_root):
+    """The letter path last delivered to this session, or None."""
+    try:
+        with open(_pickup_marker_path(sid, journal_root),
+                  encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return state.get("letter") if isinstance(state, dict) else None
+
+
+def _mark_picked_up(sid, journal_root, path):
+    marker = _pickup_marker_path(sid, journal_root)
+    try:
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        tmp = f"{marker}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"letter": path, "at": time.time()}, fh)
+        os.replace(tmp, marker)
+    except OSError:
+        pass          # a lost marker costs a repeated delivery, not the session
+
+
+def _pickup(sid, payload, journal_root, letters_dir, event):
+    """The letter for this directory, verified, as text to hand over. Or "".
+
+    Delivered ONCE per session per letter:
+
+      sessionstart      whenever the newest letter here is not the one this
+                        session was last handed. A brand-new session gets the
+                        previous session's letter; a session restarting after
+                        compaction gets the letter PreCompact just sealed.
+      userpromptsubmit  only if nothing was ever delivered, and never the
+                        session's own letter -- otherwise every seal this
+                        session makes would be read back to it on the next
+                        prompt. Registered on no host by default; it exists
+                        for one whose SessionStart context is ignored.
+
+    Age-limited by `pickup.max_age`, and that is the only judgment made here.
+    Whether the letter is still TRUE is the Verify block's job, and its answer
+    is delivered alongside rather than used to withhold: a stale letter's
+    Decided and Ruled out are still the previous session's words, and the
+    reader is told exactly which check moved.
+    """
+    from .config import Config, seconds
+    from . import letters as _L
+    from . import verify as _V
+
+    cfg = Config.load(None)
+    if cfg.get("pickup", "enabled") is False:
+        return ""
+    max_age = seconds(cfg.get("pickup", "max_age"), 7 * 86400.0)
+    cwd = field(payload, "cwd") or os.getcwd()
+    directory = os.path.expanduser(letters_dir if letters_dir is not None
+                                   else cfg.letters_dir)
+    path = _L.latest_for_cwd(directory, cwd)
+    if not path:
+        return ""
+    meta = _L.meta(path)
+    if meta.get("mtime") is None:
+        return ""
+    age = time.time() - meta["mtime"]
+    if age < 0 or age > max_age:
+        return ""
+
+    already = _picked_up(sid, journal_root)
+    if event == "sessionstart":
+        if already == path:
+            return ""
+    else:
+        if already is not None or meta.get("session") == sid:
+            return ""
+
+    try:
+        with open(path, "rb") as fh:
+            text = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    verdict = _V.run(text, cwd=cwd if os.path.isdir(cwd) else None)
+    _mark_picked_up(sid, journal_root, path)
+
+    if len(text) > PICKUP_MAX_CHARS:
+        text = (text[:PICKUP_MAX_CHARS]
+                + "\n[... letter truncated here; read the file for the rest]")
+    who = (f"a {meta['agent']} session" if meta.get("agent") else "a session")
+    if meta.get("session"):
+        who += f" ({meta['session']})"
+    return PICKUP.format(age=_L.ago(age), who=who, verdict=verdict.sentence(),
+                         path=path, text=text.rstrip("\n"))
+
+
 def _wall_hit(sid, payload, journal_root, letters_dir, cfg):
     """Seal because the host says a limit was actually refused.
 
@@ -317,7 +456,7 @@ def _wall_hit(sid, payload, journal_root, letters_dir, cfg):
 
     reseal = seconds(cfg.get("window", "reseal_after"), 600.0)
     state = _seal_state(sid, journal_root)
-    if state is not None and state.get("resets_at") == wall.get("resets_at") \
+    if state is not None and state.get("resets_at") == wall.get("resets_at") \\
             and (time.time() - _number(state.get("at"), 0.0)) < reseal:
         return ""
 
@@ -352,14 +491,35 @@ def _handle(payload, journal_root, letters_dir):
         return ""                    # nothing to key a journal on; stay silent
 
     if event in ("sessionstart", "userpromptsubmit"):
-        if _declared_anything(sid, journal_root):
-            return ""                # already declaring; do not nag every turn
-        return json.dumps({"hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": ASK.format(
+        parts = []
+        # The previous session's letter first, then the ask. The letter is
+        # what the new session needs to READ; the ask is what it needs to DO,
+        # and it stays even when a letter was handed over, because this
+        # session's own next action is not the last one's.
+        # Guarded on its own: `handle` swallows everything, so a pickup that
+        # raised would take the ask down with it, and the session would get
+        # neither the previous letter nor the instruction to write its own.
+        try:
+            handed = _pickup(sid, payload, journal_root, letters_dir, event)
+        except Exception:                                # noqa: BLE001
+            handed = ""
+        if handed:
+            parts.append(handed)
+        if not _declared_anything(sid, journal_root):
+            parts.append(ASK.format(
                 sid=sid, dim=dim_command(),
                 jroot=os.path.expanduser(
-                    journal_root or journal.default_root()))}})
+                    journal_root or journal.default_root())))
+        if not parts:
+            return ""                # already declaring; do not nag every turn
+        return json.dumps({"hookSpecificOutput": {
+            # Named for the event that actually fired. Claude Code applies
+            # additionalContext only when this matches, so answering a
+            # UserPromptSubmit as "SessionStart" is a hook that fires and is
+            # ignored -- the recurring defect, once more.
+            "hookEventName": ("SessionStart" if event == "sessionstart"
+                              else "UserPromptSubmit"),
+            "additionalContext": "\n\n".join(parts)}})
 
     if event in ("stop", "subagentstop"):
         # Fire ONCE. `stopHookActive` is true when the agent is already
