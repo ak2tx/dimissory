@@ -32,9 +32,21 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from dimissory import hook as H                                  # noqa: E402
 from dimissory import install as I                               # noqa: E402
 from dimissory import journal as J                               # noqa: E402
+from dimissory.config import _toml_str                           # noqa: E402
 
 RAN = 0
 FAILED: list = []
+
+# HERMETIC. SessionStart now looks in the CONFIGURED letters directory for a
+# letter to hand the new session, so without a private config every
+# SessionStart below would read the developer's real ~/.dimissory/letters --
+# and on a box that has used dimissory on this very repository, the ask would
+# arrive with somebody's letter in front of it. A test whose result depends
+# on the machine is not a test; test_setup_and_config records the same rule.
+_HOME = tempfile.mkdtemp(prefix="dim-hook-home-")
+with open(os.path.join(_HOME, "config.toml"), "w", encoding="utf-8") as _fh:
+    _fh.write(f'[letters]\ndir = "{_toml_str(os.path.join(_HOME, "letters"))}"\n')
+os.environ["DIMISSORY_CONFIG"] = os.path.join(_HOME, "config.toml")
 
 
 def check(name, cond, detail=""):

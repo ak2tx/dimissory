@@ -228,11 +228,21 @@ def test_checks_run_without_a_shell():
     redirection, chaining and expansion to anything that ever lands there.
     """
     import shlex
-    src = open(os.path.join(ROOT, "src", "dimissory", "cli.py")).read()
-    body = src[src.index("def cmd_resume"):src.index("def cmd_setup")]
-    check("resume does not run checks through a shell",
+    # The comparison moved to verify.py so the pickup hook could share it.
+    # The property moved with it, and `cmd_resume` must not have kept a
+    # second copy -- a rule living in two places is how the exclusion
+    # pathspec and the O_EXCL claim were each fixed once and found broken
+    # again one call site over.
+    src = open(os.path.join(ROOT, "src", "dimissory", "verify.py")).read()
+    body = src[src.index("def run"):]
+    check("the verifier does not run checks through a shell",
           "shell=True" not in body, "shell=True is present")
     check("it splits the command instead", "shlex.split" in body)
+    cli_src = open(os.path.join(ROOT, "src", "dimissory", "cli.py")).read()
+    resume = cli_src[cli_src.index("def cmd_resume"):cli_src.index("def cmd_pickup")]
+    check("and cmd_resume keeps no comparison of its own",
+          "subprocess.run" not in resume and "shell=True" not in resume)
+    check("it delegates to the one owner", "verify" in resume)
 
     argv = shlex.split("git status --porcelain -- ':(exclude)letters'")
     check("the pathspec becomes ONE argv element",
