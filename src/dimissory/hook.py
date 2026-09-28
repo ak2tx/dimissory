@@ -456,7 +456,7 @@ def _wall_hit(sid, payload, journal_root, letters_dir, cfg):
 
     reseal = seconds(cfg.get("window", "reseal_after"), 600.0)
     state = _seal_state(sid, journal_root)
-    if state is not None and state.get("resets_at") == wall.get("resets_at") \\
+    if state is not None and state.get("resets_at") == wall.get("resets_at") \
             and (time.time() - _number(state.get("at"), 0.0)) < reseal:
         return ""
 

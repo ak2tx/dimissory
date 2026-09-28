@@ -338,8 +338,11 @@ def test_the_journal_can_be_pointed_somewhere_writable():
               values.get("task") == "recorded somewhere writable", values)
     finally:
         os.environ.pop("DIMISSORY_HOME", None)
+    # Slashes normalised: on Windows expanduser keeps the forward slashes of
+    # "~/.dimissory/journal" while os.path.join builds backslashes, so the
+    # two never matched there and the check was red on every Windows runner.
     check("without it, the default is unchanged",
-          J.default_root().endswith(os.path.join(".dimissory", "journal")),
+          J.default_root().replace("\\", "/").endswith(".dimissory/journal"),
           J.default_root())
 
 

@@ -139,7 +139,12 @@ def test_the_command_the_ask_emits_actually_runs():
     # RUN IT, with the placeholders filled the way an agent would fill them.
     real = (cmd.replace("<one line: what this session is for>", "a real task")
                .replace("<one line: the exact next action>", "a real next"))
-    real = real.replace(cmd.split()[0],
+    # The WHOLE resolved command, not its first word. From a checkout with
+    # nothing installed, dim_command() is already `<python> -m dimissory.cli`,
+    # and replacing only the interpreter doubled the `-m` -- so this test
+    # passed wherever dim happened to be installed and failed on every CI
+    # runner: measuring the developer's machine rather than the code.
+    real = real.replace(H.dim_command(),
                         f"{sys.executable} -m dimissory.cli", 1)
     p = subprocess.run(["/bin/sh", "-c", real], capture_output=True, text=True,
                        env={**os.environ,
