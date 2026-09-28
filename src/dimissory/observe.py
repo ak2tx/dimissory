@@ -22,6 +22,15 @@ from .brief import UNMEASURED, Check, Observed
 
 _TIMEOUT = 5.0
 
+# The project's own instruction files, in the order a reader should open them.
+# Each agent CLI reads only its own (Claude Code reads CLAUDE.md, Codex reads
+# AGENTS.md), so a session continuing another vendor's work has no idea the
+# other file exists unless the letter names it. Existence is checked, never
+# contents: the letter points at the project's explanation rather than
+# copying it, which is what keeps a letter short and the pointer current.
+GUIDES = ("CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursorrules",
+          ".github/copilot-instructions.md", "CONTRIBUTING.md", "README.md")
+
 
 def _git(cwd, *args):
     """One git invocation, or UNMEASURED. Never raises, never guesses."""
@@ -56,6 +65,28 @@ def observe(cwd=None, transcript=None, window=None, session_started=None,
     cwd = cwd or os.getcwd()
     head = _git(cwd, "rev-parse", "--short", "HEAD")
     subject = _git(cwd, "log", "-1", "--format=%s")
+    # `HEAD` is what git prints for a detached checkout. That is still a
+    # measurement, and it is what the verify command will print again.
+    branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+
+    # The directory itself is a fact worth recording: it is what lets the
+    # next session in this project be handed this letter rather than the
+    # most recent letter from anywhere. Absolute, so it survives a reader
+    # whose own cwd is somewhere else.
+    where = UNMEASURED
+    guides = UNMEASURED
+    if cwd and os.path.isdir(cwd):
+        where = os.path.abspath(cwd)
+        found = tuple(g for g in GUIDES
+                      if os.path.isfile(os.path.join(cwd, *g.split("/"))))
+        # An empty tuple is a MEASURED "no guide files here", kept as such;
+        # the renderer omits the line because there is nothing to point at.
+        guides = found
+
+    agent = UNMEASURED
+    if transcript:
+        from .window import provider_for
+        agent = provider_for(transcript) or UNMEASURED
     # Excluding our own directories HERE as well as in the check. They were
     # filtered in one place and not the other, so the letter reported
     # `dirty j/, src.py` while verifying only `src.py` -- two different answers
@@ -98,6 +129,7 @@ def observe(cwd=None, transcript=None, window=None, session_started=None,
         others = window.get("also") or UNMEASURED
 
     return Observed(
+        cwd=where, branch=branch, agent=agent, guides=guides,
         head=head, head_subject=subject, dirty=dirty,
         calls=calls, window_used_percent=used, window_resets_at=resets,
         window_label=label, window_also=others,
@@ -161,6 +193,14 @@ def checks_for(observed, cwd=None, porcelain=None, our_dirs=()):
             command="git rev-parse --short HEAD",
             expect=k["head"],
             why="the commit this letter was written against",
+        ))
+    if "branch" in k and k["branch"]:
+        # Two branches can sit on one commit, and a reader who has checked
+        # out the other one will commit the continuation to the wrong place.
+        out.append(Check(
+            command="git rev-parse --abbrev-ref HEAD",
+            expect=k["branch"],
+            why="the branch the work is on",
         ))
     if "dirty" in k and k["dirty"]:
         # The expectation must be the command's ACTUAL OUTPUT, not a prose

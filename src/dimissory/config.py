@@ -47,9 +47,20 @@ DEFAULTS = {
         "codex": True,
         "grok": True,
     },
+    "pickup": {
+        # A session that starts in a directory holding a letter is handed
+        # that letter by the SessionStart hook -- once, with its Verify block
+        # already run. This is the receiving half of a handoff, and without
+        # it the letter is only useful to a person who remembers it exists.
+        "enabled": True,
+        # A letter older than this is not offered. A week covers the weekly
+        # cap, which is the longest anyone waits for a window to reopen; the
+        # Verify block, not this setting, is what decides staleness.
+        "max_age": "7d",
+    },
 }
 
-TEMPLATE = '''\
+TEMPLATE = '''\\
 # dimissory -- settings
 #
 # Everything here has a working default; delete a line to go back to it.
@@ -81,6 +92,16 @@ keep = {keep}
 claude = {claude}
 codex = {codex}
 grok = {grok}
+
+[pickup]
+# When a session starts in a directory that has a handoff letter, the hook
+# hands it the letter (Verify block already run) so it continues instead of
+# reconstructing. Set enabled = false to only ever pick up by hand, with
+# `dim pickup`.
+enabled = {enabled}
+
+# Letters older than this are not offered at session start.
+max_age = "{max_age}"
 '''
 
 
@@ -130,8 +151,8 @@ def write_at(cfg, default=0.85):
 def _toml_str(value):
     """A TOML basic string that survives a Windows path.
 
-    `dim setup` on Windows wrote `dir = "C:\\Users\\me\\..."` with the
-    backslashes raw. `\\U` is a unicode escape in a TOML basic string, so the
+    `dim setup` on Windows wrote `dir = "C:\\\\Users\\\\me\\\\..."` with the
+    backslashes raw. `\\\\U` is a unicode escape in a TOML basic string, so the
     tool could not parse the config it had just written -- and fell back to
     defaults while the operator's file sat there looking used. A wrong location
     reported as success, which is the defect this project inherited a whole file
@@ -141,8 +162,8 @@ def _toml_str(value):
     string has no escape at all and would break on a path containing a quote.
     """
     out = str(value)
-    for bad, good in (("\\", "\\\\"), ('"', '\\"'),
-                      ("\n", "\\n"), ("\r", "\\r"), ("\t", "\\t")):
+    for bad, good in (("\\\\", "\\\\\\\\"), ('"', '\\\\"'),
+                      ("\\n", "\\\\n"), ("\\r", "\\\\r"), ("\\t", "\\\\t")):
         out = out.replace(bad, good)
     return out
 

@@ -69,6 +69,18 @@ class Observed:
     string, or "unknown" -- all three of which read as findings.
     """
 
+    # WHERE the letter was written, so the next session in the same directory
+    # can be handed it. A letter that does not say which project it is about
+    # cannot be picked up by anything but a human who remembers.
+    cwd: object = UNMEASURED
+    branch: object = UNMEASURED
+    # Which agent CLI wrote the transcript this was sealed from. A reader
+    # switching vendors wants to know whose session they are continuing.
+    agent: object = UNMEASURED
+    # The project's own instruction files (CLAUDE.md, AGENTS.md, README.md
+    # ...) that exist in cwd. Each CLI reads only its own; a Codex session
+    # continuing Claude's work does not know CLAUDE.md is there unless told.
+    guides: object = UNMEASURED          # tuple[str, ...] of relative paths
     head: object = UNMEASURED            # git commit, short
     head_subject: object = UNMEASURED
     dirty: object = UNMEASURED           # tuple[str, ...] of paths
@@ -108,10 +120,18 @@ class Declared:
     ruled_out: tuple = ()
     next_action: Optional[str] = None
     constraints: tuple = ()
+    # What has been FINISHED, and what was LEARNED about the codebase along
+    # the way. Both accumulate. A next action without the progress behind it
+    # reads as a plan from nowhere, and a fact the previous session spent an
+    # hour discovering ("the flaky test is test_x", "the API needs FOO=1") is
+    # exactly what "explaining the whole project again" consists of.
+    done: tuple = ()
+    learned: tuple = ()
 
     def is_empty(self) -> bool:
         return not any((self.task, self.decided, self.ruled_out,
-                        self.next_action, self.constraints))
+                        self.next_action, self.constraints, self.done,
+                        self.learned))
 
 
 @dataclasses.dataclass(frozen=True)

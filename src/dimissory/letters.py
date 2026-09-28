@@ -65,6 +65,94 @@ def _body(text):
                      if not line.startswith("Issued by dimissory at "))
 
 
+def meta(path):
+    """What a letter says about itself, read back off the page.
+
+    A letter is Markdown, not a database record, and it is deliberately the
+    only artifact -- there is no sidecar index that can drift from the file it
+    describes. So the few facts pickup needs (which directory, which session,
+    which agent) are read from the Observed block, where render.py writes them
+    at the start of a line. Missing lines come back as None, never guessed.
+
+    `mtime` is the file's, not the "Issued by" stamp: the stamp is local time
+    with no zone, and a file's age is what "sealed 12 minutes ago" means.
+    """
+    out = {"path": path, "session": None, "cwd": None, "branch": None,
+           "agent": None, "degraded": False, "mtime": None}
+    try:
+        out["mtime"] = os.path.getmtime(path)
+    except OSError:
+        pass
+    try:
+        with open(path, "rb") as fh:
+            text = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return out
+    first = text.split("\n", 1)[0]
+    if first.startswith("# Dimissory letter: "):
+        out["session"] = first[len("# Dimissory letter: "):].strip() or None
+    out["degraded"] = "> **DEGRADED" in text
+    i = text.find("## Observed")
+    if i == -1:
+        return out
+    a = text.find("```", i)
+    b = text.find("```", a + 3) if a != -1 else -1
+    if a == -1 or b == -1:
+        return out
+    for line in text[a + 3:b].splitlines():
+        for key in ("cwd", "branch", "agent"):
+            if line.startswith(key + " "):
+                value = line[len(key):].strip()
+                out[key] = value or None
+    return out
+
+
+def _same_dir(a, b):
+    """Whether two paths name one directory, through symlinks and case."""
+    try:
+        return (os.path.normcase(os.path.realpath(os.path.expanduser(a)))
+                == os.path.normcase(os.path.realpath(os.path.expanduser(b))))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def latest_for_cwd(directory, cwd):
+    """The newest letter written IN this directory, or None.
+
+    Newest by mtime with the name as tiebreak, the same rule `dim show`
+    uses. Letters that record no directory -- written before it was measured,
+    or with no directory to measure -- never match: handing a session the
+    wrong project's letter is worse than handing it nothing.
+    """
+    if not cwd:
+        return None
+    try:
+        names = [f for f in os.listdir(directory) if f.endswith(".md")]
+    except OSError:
+        return None
+    best = None
+    for name in names:
+        p = os.path.join(directory, name)
+        m = meta(p)
+        if not m.get("cwd") or not _same_dir(m["cwd"], cwd):
+            continue
+        key = (m.get("mtime") or 0.0, name)
+        if best is None or key > best[0]:
+            best = (key, p)
+    return best[1] if best else None
+
+
+def ago(seconds):
+    """`3m`, `1.5h`, `2.1d`. For "sealed N ago", where precision is noise."""
+    if seconds < 90:
+        return f"{int(seconds)}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
 def latest_for(directory, session):
     """The newest letter for this session, or None."""
     prefix = f"{str(session)[:60]}-"

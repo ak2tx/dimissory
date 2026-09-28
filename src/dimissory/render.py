@@ -60,6 +60,15 @@ def _lines(observed) -> list:
     """The observed block, containing only what was actually measured."""
     out = []
     k = observed.known()
+    # The key at the START of the line, one space after it, is load-bearing:
+    # letters.meta() reads `cwd`, `branch` and `agent` back out of this block
+    # to match a letter to a directory. Change the layout and pickup goes
+    # blind without any test of the renderer noticing.
+    if "cwd" in k:
+        out.append(f"cwd         {k['cwd']}")
+    if "branch" in k:
+        b = k["branch"]
+        out.append(f"branch      {'(detached)' if b == 'HEAD' else b}")
     if "head" in k:
         subj = k.get("head_subject")
         out.append(f"HEAD        {k['head']}" + (f"  {subj!r}" if subj else ""))
@@ -101,6 +110,12 @@ def _lines(observed) -> list:
             name = other.get("window") or "other"
             if isinstance(pct, (int, float)):
                 out.append(f"            {name}  {pct:.0f}% used")
+    if "agent" in k:
+        out.append(f"agent       {k['agent']}")
+    if "guides" in k and k["guides"]:
+        # Omitted when none exist: there is nothing to point a reader at, and
+        # "guides (none)" would only be read as an instruction to go looking.
+        out.append(f"guides      {', '.join(k['guides'])}")
     return out
 
 
@@ -178,12 +193,18 @@ def render(brief: Brief) -> str:
                 stale.append(("Task", d.task, ages.get("task")))
             else:
                 parts += [head("Task", "task"), "", d.task, ""]
+        if d.done:
+            parts += [head("Done", "done"), ""]
+            parts += [f"- {x}" for x in d.done] + [""]
         if d.decided:
             parts += [head("Decided", "decided"), ""]
             parts += [f"- {x}" for x in d.decided] + [""]
         if d.ruled_out:
             parts += [head("Ruled out", "ruled_out"), ""]
             parts += [f"- {x}" for x in d.ruled_out] + [""]
+        if d.learned:
+            parts += [head("Learned", "learned"), ""]
+            parts += [f"- {x}" for x in d.learned] + [""]
         if d.next_action:
             if is_stale("next", ages.get("next")):
                 stale.append(("Next action", d.next_action, ages.get("next")))
@@ -213,11 +234,19 @@ def render(brief: Brief) -> str:
 
     parts += [
         "## Resume", "",
-        "Paste into any agent CLI:", "",
+        "For whoever continues -- another model, another account, or this "
+        "session after",
+        "compaction. A session started in the same directory is handed this "
+        "letter by the",
+        "dimissory hook; anywhere else, paste this into the agent CLI:", "",
         "```",
-        f'Read the dimissory letter for "{brief.session}", run its Verify '
-        f"block, then",
-        "continue from Next action. If a check disagrees, stop and say so.",
+        f'Continue the session "{brief.session}" from its dimissory letter. '
+        f"Read the project",
+        "guides it lists under Observed, run its Verify block, then continue "
+        "from Next",
+        "action -- do not reconstruct what the letter already records. If a "
+        "check",
+        "disagrees, stop and say so.",
         "```",
         "",
     ]

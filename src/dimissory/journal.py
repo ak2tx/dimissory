@@ -50,7 +50,7 @@ _SEGMENT: dict = {}
 # Fields that describe CURRENT STATE: the last one written wins.
 CURRENT = ("task", "next")
 # Fields that ACCUMULATE: every entry is kept, in order.
-ACCUMULATE = ("decided", "ruled_out", "constraint")
+ACCUMULATE = ("decided", "ruled_out", "constraint", "done", "learned")
 FIELDS = CURRENT + ACCUMULATE
 # Retracting one. Review: "accumulated decisions and constraints contradict one
 # another without revocation" -- without this, a decision the agent REVERSED an
@@ -284,6 +284,8 @@ def to_declared(session, root=None, sealed_at=None):
         ruled_out=values.get("ruled_out", ()),
         next_action=values.get("next"),
         constraints=values.get("constraint", ()),
+        done=values.get("done", ()),
+        learned=values.get("learned", ()),
     )
     # None, not 0, for a field never declared -- the same rule as everywhere
     # else in this project. Zero would read as "declared just now".
