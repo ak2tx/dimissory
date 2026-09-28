@@ -60,6 +60,60 @@ def recent_calls(path, limit=LIMIT, tail_bytes=TAIL_BYTES):
     return tuple(out[-limit:])
 
 
+def last_command(path, tail_bytes=TAIL_BYTES):
+    """The last shell command in the tail, and whether it failed. Or None.
+
+    Claude Code and Codex write the Anthropic message shape: an assistant
+    `tool_use` with an id, then a user `tool_result` carrying `tool_use_id`
+    and `is_error`. A command is any tool call whose input has a string
+    `command` -- Bash on Claude Code -- and its outcome is the host's own
+    error flag, not an exit code: no transcript measured carries the exit
+    code, so the letter does not claim one.
+
+    Returns {"hint": str, "failed": bool | None}. `failed` is None when the
+    result has not arrived yet -- the command the session was in the middle
+    of when the letter was sealed, which is exactly the one a reader wants.
+    The hint is the tool's own description when it has one, else the first
+    48 characters of the command, the same rule `recent_calls` uses.
+    """
+    path = resolve(path)
+    if not path or not os.path.exists(path):
+        return None
+    commands = {}                    # tool_use id -> hint, in order seen
+    outcomes = {}                    # tool_use id -> is_error
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > tail_bytes:
+                fh.seek(size - tail_bytes)
+                fh.readline()
+            for raw in fh:
+                try:
+                    d = json.loads(raw)
+                except ValueError:
+                    continue
+                content = (d.get("message") or {}).get("content")
+                if not isinstance(content, list):
+                    continue
+                for c in content:
+                    if not isinstance(c, dict):
+                        continue
+                    if c.get("type") == "tool_use":
+                        args = c.get("input")
+                        if (isinstance(args, dict)
+                                and isinstance(args.get("command"), str)
+                                and c.get("id")):
+                            commands[c["id"]] = _step_from(args) or "(command)"
+                    elif c.get("type") == "tool_result" and c.get("tool_use_id"):
+                        outcomes[c["tool_use_id"]] = bool(c.get("is_error"))
+    except OSError:
+        return None
+    if not commands:
+        return None
+    last_id = list(commands)[-1]
+    return {"hint": commands[last_id], "failed": outcomes.get(last_id)}
+
+
 def resolve(path):
     """The file to actually read, given whatever the host handed us.
 

@@ -229,7 +229,8 @@ def run(config_path=None, assume_yes=None, out=print, hook_paths=None,
                   checks=checks_for(o))
         from . import letters as _L
         try:
-            path = _L.write(d, "setup-check", render(b))
+            path = _L.write(d, "setup-check", render(b),
+                            keep=cfg.get("letters", "keep"))
             if path is None:
                 raise OSError(f"could not claim a letter name in {d}")
             measured = sorted(o.known())

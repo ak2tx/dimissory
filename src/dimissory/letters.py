@@ -166,8 +166,55 @@ def latest_for(directory, session):
     return os.path.join(directory, sorted(names)[-1])
 
 
-def write(directory, session, text, when=None):
+def _by_age(directory):
+    """Every letter in `directory`, oldest first. Mtime, then name."""
+    def key(p):
+        try:
+            return (os.path.getmtime(p), os.path.basename(p))
+        except OSError:
+            return (0.0, os.path.basename(p))
+    return sorted((os.path.join(directory, f) for f in os.listdir(directory)
+                   if f.endswith(".md")), key=key)
+
+
+def prune(directory, keep, spare=None):
+    """Delete the oldest letters beyond `keep`. Returns the paths removed.
+
+    `letters.keep` was documented as "older ones are pruned" and read by
+    nothing at all, so the directory grew without bound and every session
+    start scanned all of it looking for a letter to hand over. A setting
+    that promises something inert is the defect this project keeps a
+    docstring about, one config key over.
+
+    `keep` must be a positive integer; anything else keeps everything, and
+    the template says so. Zero is NOT "delete them all": a typo in a config
+    file must not be able to erase every letter on the machine. `spare` is
+    never removed whatever its age -- the letter just written is the one
+    the caller is about to report a path for.
+    """
+    if isinstance(keep, bool) or not isinstance(keep, int) or keep <= 0:
+        return []
+    try:
+        files = _by_age(directory)
+    except OSError:
+        return []
+    removed = []
+    for p in (files[:-keep] if len(files) > keep else []):
+        if spare and os.path.abspath(p) == os.path.abspath(spare):
+            continue
+        try:
+            os.remove(p)
+            removed.append(p)
+        except OSError:
+            pass
+    return removed
+
+
+def write(directory, session, text, when=None, keep=None):
     """Claim a name and write `text` into it. Returns the path, or None.
+
+    `keep` is `letters.keep`: after a successful write, letters beyond that
+    many are pruned, oldest first -- see `prune`.
 
     A LETTER IDENTICAL TO THE LAST ONE IS NOT WRITTEN. Measured: one short
     Codex session produced FOUR letters. The margin guard was working
@@ -202,4 +249,5 @@ def write(directory, session, text, when=None):
             fh.write(text)
     except OSError:
         return None
+    prune(directory, keep, spare=path)
     return path

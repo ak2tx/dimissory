@@ -84,11 +84,13 @@ reseal_after = "{reseal_after}"
 # Where letters are written.
 dir = "{dir}"
 
-# How many to keep. Older ones are pruned.
+# How many to keep. When a new letter is written, older ones beyond this
+# many are deleted. 0 or less keeps everything.
 keep = {keep}
 
 [agents]
-# Which agent CLIs to write letters for.
+# Which agent CLIs to write letters for. `dim setup` installs hooks only for
+# these, and a hook already installed stays silent for one set to false.
 claude = {claude}
 codex = {codex}
 grok = {grok}

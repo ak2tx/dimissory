@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -420,6 +421,80 @@ def _pickup(sid, payload, journal_root, letters_dir, event):
                          path=path, text=text.rstrip("\n"))
 
 
+# The declared half's weakest field is `done`: nobody records progress at
+# the moment it happens unless asked at that moment. A commit is the one
+# unmistakable "I finished something" a hook can see, so it is the one
+# moment the hook asks. Once per NUDGE_EVERY, so a session that commits
+# every minute is not lectured every minute.
+NUDGE = (
+    "dimissory: that was a commit. Record what it finished, in one line, so "
+    "the handoff letter carries it:\n"
+    "  {dim} --journal {jroot} declare --session {sid} --done \"<what this "
+    "commit finished>\"\n"
+    "and update --next if the next action changed."
+)
+NUDGE_EVERY = 300.0
+
+# `git commit`, allowing git's GLOBAL options between the two words, and not
+# `git log --grep commit`. The options that take a separate argument are
+# named, because a generic "flag plus one word" also swallows the subcommand:
+# `git --no-pager log --grep commit` would then read as a commit. The first
+# version allowed flags but not their arguments, so `git -C repo commit` --
+# the form an agent uses when it is not in the repo -- was never seen.
+_COMMIT = re.compile(
+    r"\bgit(\s+(-[Cc]\s+\S+|--(git-dir|work-tree|namespace)(=|\s+)\S+|-\S+))*"
+    r"\s+commit\b")
+
+
+def _tool_command(payload):
+    """The shell command a tool-call payload ran, or None.
+
+    Claude Code sends `tool_input` with a `command` for Bash. The camelCase
+    alias is read for the same reason every other key has one. A payload
+    with no command -- an edit, a read, a vendor that sends nothing -- is
+    simply not a commit, and the hook says nothing.
+    """
+    for key in ("tool_input", "toolInput"):
+        args = payload.get(key)
+        if isinstance(args, dict) and isinstance(args.get("command"), str):
+            return args["command"]
+    return None
+
+
+def _nudge_marker_path(sid, journal_root):
+    root = os.path.expanduser(journal_root or journal.default_root())
+    return os.path.join(root, ".nudged", f"{_safe_name(sid)}.json")
+
+
+def _nudge(sid, payload, journal_root):
+    """After a commit, ask for `--done`. Returns text or ""."""
+    command = _tool_command(payload)
+    if not command or not _COMMIT.search(command):
+        return ""
+    marker = _nudge_marker_path(sid, journal_root)
+    now = time.time()
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            last = json.load(fh).get("at")
+    except (OSError, ValueError, AttributeError):
+        last = None
+    if isinstance(last, (int, float)) and (now - last) < NUDGE_EVERY:
+        return ""
+    try:
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        tmp = f"{marker}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"at": now}, fh)
+        os.replace(tmp, marker)
+    except OSError:
+        pass          # a lost marker costs a repeated nudge, not the session
+    return json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": NUDGE.format(
+            sid=sid, dim=dim_command(),
+            jroot=os.path.expanduser(journal_root or journal.default_root()))}})
+
+
 def _wall_hit(sid, payload, journal_root, letters_dir, cfg):
     """Seal because the host says a limit was actually refused.
 
@@ -484,11 +559,119 @@ def _wall_hit(sid, payload, journal_root, letters_dir, cfg):
             f"so a handoff letter was sealed at {path}.{when}{tail}"}})
 
 
+def _on_tool_call(sid, payload, journal_root, letters_dir):
+    """The window check on the tool-call heartbeat. Returns text or "".
+
+    Split out of `_handle` so a tool call that seals nothing can still
+    carry a nudge -- see `_nudge` -- without the two paths tangling.
+    """
+    from . import window as _W
+    from .config import Config, seconds, write_at
+    cfg = Config.load(None)
+    win = _W.read(transcript=field(payload, "transcript"))
+    # Shared with `dim status` so the two cannot disagree about the
+    # margin, and bool-safe: `write_at = false` was becoming 0.0, which
+    # means "always seal", because bool subclasses int.
+    due = _W.should_seal(win, write_at(cfg))
+    # None and False are different answers and this used to collapse them.
+    # should_seal goes out of its way to distinguish "no meter at all" from
+    # "plenty of room left"; discarding that one line later made a Claude
+    # session -- which has no meter -- indistinguishable from a session
+    # with budget to spare, which is the exact conflation this project's
+    # UNMEASURED singleton exists to prevent.
+    if due is not True:
+        # BOTH None and False come here, and that is the fix for a
+        # regression the statusline work introduced. Gating this on `due
+        # is None` alone meant a working-but-sub-threshold meter SILENCED
+        # the at-the-wall path: measured, a fresh 84% cache plus a live
+        # `quotaLimits` rejection produced NO letter, where deleting the
+        # cache produced one. Installing the meter made Claude worse.
+        #
+        # A rejection is ground truth. The percentage is a sample, and it
+        # can be under the margin, stale, or from the other window; none
+        # of that outranks the host telling us it just refused a request.
+        return _wall_hit(sid, payload, journal_root, letters_dir, cfg)
+
+    # Seal once per window, then refresh at an interval. A letter written
+    # at 85% and never touched again is describing a session that has
+    # since run to 99%.
+    reseal = seconds(cfg.get("window", "reseal_after"), 600.0)
+    grace = seconds(cfg.get("window", "grace"), 300.0)
+    declared = _declared_anything(sid, journal_root)
+    now = time.time()
+
+    state = _seal_state(sid, journal_root)
+    same_window = (state is not None and state.get("resets_at")
+                   == (win.resets_at if win else None))
+    first_crossing = (_number(state.get("first_crossing"), now)
+                      if same_window else now)
+
+    upgrading = False
+    if same_window:
+        # GRACE. The setting used to promise "wait this long for the
+        # agent's half before writing without it", which a hook cannot
+        # do: blocking a PostToolUse hook for five minutes freezes the
+        # user's session, and if the session then dies mid-wait there is
+        # no letter at all -- strictly worse than a degraded one.
+        #
+        # So the letter goes out IMMEDIATELY, and grace is the window
+        # during which a letter that went out without the agent's half is
+        # UPGRADED the moment that half arrives. Same intent, better
+        # guarantee: there is always a letter on disk, and it improves.
+        upgrading = (bool(state.get("degraded")) and declared
+                     and (now - first_crossing) < grace)
+        if not upgrading and (now - _number(state.get("at"), 0.0)) < reseal:
+            return ""
+
+    path = seal(sid, payload, journal_root, letters_dir)
+    if not path:
+        return ""
+    _record_seal(sid, journal_root, win, degraded=not declared,
+                 first_crossing=first_crossing)
+
+    head = (f"dimissory: {win.used_percent:.0f}% of your {win.label()} "
+            f"window is gone, so a handoff letter was sealed at {path}.")
+    if declared:
+        tail = (f" If your next action has changed, record it now with "
+                f"`{dim_command()} declare --session {sid} --next \"...\"`"
+                f" -- there may not be a later chance.")
+        if upgrading:
+            head = (f"dimissory: the handoff letter at {path} has been "
+                    f"rewritten to include what you declared.")
+            tail = ""
+    else:
+        # The letter just written is missing the half only the agent can
+        # supply, and it is labelled DEGRADED. Saying so is the point:
+        # this is the last reliable moment to fix it.
+        mins = max(1, int(grace // 60))
+        tail = (f" It is marked DEGRADED because you have declared "
+                f"nothing, so it carries no task and no next action. Run "
+                f"this now and the letter will be rewritten with it:\n"
+                f"  {dim_command()} declare --session {sid} --task "
+                f"\"<what this session is for>\" --next \"<the exact next "
+                f"action>\"\nAfter about {mins} minute(s) the degraded "
+                f"letter stands as final.")
+    return json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse", "additionalContext": head + tail}})
+
+
 def _handle(payload, journal_root, letters_dir):
     event = normalise_event(field(payload, "event"))
     sid = field(payload, "session")
     if not sid:
         return ""                    # nothing to key a journal on; stay silent
+
+    # A disabled agent's hook stays silent. `agents.<name> = false` used to
+    # gate only what `dim setup` installed; a hook already in place kept
+    # sealing regardless, so the setting read as off while letters kept
+    # arriving. Decided from the transcript, the same way the meter decides
+    # whose window it is reading, and never guessed when no transcript came.
+    from .window import provider_for
+    agent = provider_for(field(payload, "transcript"))
+    if agent:
+        from .config import Config
+        if Config.load(None).get("agents", agent) is False:
+            return ""
 
     if event in ("sessionstart", "userpromptsubmit"):
         parts = []
@@ -541,94 +724,13 @@ def _handle(payload, journal_root, letters_dir):
     # written while the agent still has budget -- which is the entire claim,
     # and the difference from every tool that reacts to a 429.
     if event in ("posttooluse", "posttoolusefailure"):
-        from . import window as _W
-        from .config import Config, seconds, write_at
-        cfg = Config.load(None)
-        win = _W.read(transcript=field(payload, "transcript"))
-        # Shared with `dim status` so the two cannot disagree about the
-        # margin, and bool-safe: `write_at = false` was becoming 0.0, which
-        # means "always seal", because bool subclasses int.
-        due = _W.should_seal(win, write_at(cfg))
-        # None and False are different answers and this used to collapse them.
-        # should_seal goes out of its way to distinguish "no meter at all" from
-        # "plenty of room left"; discarding that one line later made a Claude
-        # session -- which has no meter -- indistinguishable from a session
-        # with budget to spare, which is the exact conflation this project's
-        # UNMEASURED singleton exists to prevent.
-        if due is not True:
-            # BOTH None and False come here, and that is the fix for a
-            # regression the statusline work introduced. Gating this on `due
-            # is None` alone meant a working-but-sub-threshold meter SILENCED
-            # the at-the-wall path: measured, a fresh 84% cache plus a live
-            # `quotaLimits` rejection produced NO letter, where deleting the
-            # cache produced one. Installing the meter made Claude worse.
-            #
-            # A rejection is ground truth. The percentage is a sample, and it
-            # can be under the margin, stale, or from the other window; none
-            # of that outranks the host telling us it just refused a request.
-            return _wall_hit(sid, payload, journal_root, letters_dir, cfg)
-
-        # Seal once per window, then refresh at an interval. A letter written
-        # at 85% and never touched again is describing a session that has
-        # since run to 99%.
-        reseal = seconds(cfg.get("window", "reseal_after"), 600.0)
-        grace = seconds(cfg.get("window", "grace"), 300.0)
-        declared = _declared_anything(sid, journal_root)
-        now = time.time()
-
-        state = _seal_state(sid, journal_root)
-        same_window = (state is not None and state.get("resets_at")
-                       == (win.resets_at if win else None))
-        first_crossing = (_number(state.get("first_crossing"), now)
-                          if same_window else now)
-
-        upgrading = False
-        if same_window:
-            # GRACE. The setting used to promise "wait this long for the
-            # agent's half before writing without it", which a hook cannot
-            # do: blocking a PostToolUse hook for five minutes freezes the
-            # user's session, and if the session then dies mid-wait there is
-            # no letter at all -- strictly worse than a degraded one.
-            #
-            # So the letter goes out IMMEDIATELY, and grace is the window
-            # during which a letter that went out without the agent's half is
-            # UPGRADED the moment that half arrives. Same intent, better
-            # guarantee: there is always a letter on disk, and it improves.
-            upgrading = (bool(state.get("degraded")) and declared
-                         and (now - first_crossing) < grace)
-            if not upgrading and (now - _number(state.get("at"), 0.0)) < reseal:
-                return ""
-
-        path = seal(sid, payload, journal_root, letters_dir)
-        if not path:
-            return ""
-        _record_seal(sid, journal_root, win, degraded=not declared,
-                     first_crossing=first_crossing)
-
-        head = (f"dimissory: {win.used_percent:.0f}% of your {win.label()} "
-                f"window is gone, so a handoff letter was sealed at {path}.")
-        if declared:
-            tail = (f" If your next action has changed, record it now with "
-                    f"`{dim_command()} declare --session {sid} --next \"...\"`"
-                    f" -- there may not be a later chance.")
-            if upgrading:
-                head = (f"dimissory: the handoff letter at {path} has been "
-                        f"rewritten to include what you declared.")
-                tail = ""
-        else:
-            # The letter just written is missing the half only the agent can
-            # supply, and it is labelled DEGRADED. Saying so is the point:
-            # this is the last reliable moment to fix it.
-            mins = max(1, int(grace // 60))
-            tail = (f" It is marked DEGRADED because you have declared "
-                    f"nothing, so it carries no task and no next action. Run "
-                    f"this now and the letter will be rewritten with it:\n"
-                    f"  {dim_command()} declare --session {sid} --task "
-                    f"\"<what this session is for>\" --next \"<the exact next "
-                    f"action>\"\nAfter about {mins} minute(s) the degraded "
-                    f"letter stands as final.")
-        return json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PostToolUse", "additionalContext": head + tail}})
+        # The seal decides first. Only a tool call that produced nothing to
+        # say about the window gets the nudge, so the two never compete for
+        # the same context and a seal notice is never buried. A FAILED tool
+        # call is never a commit worth recording.
+        return (_on_tool_call(sid, payload, journal_root, letters_dir)
+                or (_nudge(sid, payload, journal_root)
+                    if event == "posttooluse" else ""))
 
     if event in ("precompact", "sessionend"):
         path = seal(sid, payload, journal_root, letters_dir)
@@ -654,9 +756,10 @@ def seal(sid, payload, journal_root=None, letters_dir=None):
     # letters where nothing would ever look for them, reporting success both
     # times -- the predecessor's "wrong location reported as success", which
     # install.py keeps a whole docstring about.
+    from .config import Config
+    cfg = Config.load(None)
     if letters_dir is None:
-        from .config import Config
-        letters_dir = Config.load(None).letters_dir
+        letters_dir = cfg.letters_dir
     letters = os.path.expanduser(letters_dir)
     jroot = os.path.expanduser(journal_root or journal.default_root())
     ours = (letters, jroot)
@@ -700,7 +803,8 @@ def seal(sid, payload, journal_root=None, letters_dir=None):
     # then found still clobbering same-second names. A fix that lives in a
     # caller instead of a function gets to be found twice.
     from . import letters as _L
-    return _L.write(letters, sid, render(brief))
+    return _L.write(letters, sid, render(brief),
+                    keep=cfg.get("letters", "keep"))
 
 
 def main(argv=None, stdin=None):

@@ -109,12 +109,25 @@ def observe(cwd=None, transcript=None, window=None, session_started=None,
         # UNMEASURED. The difference is the whole point of this module.
         dirty = tuple(ln[3:] for ln in status.splitlines() if len(ln) > 3)
 
+    # How much uncommitted work there is, in git's own words. Untracked files
+    # are not in a diff, so `dirty` above still carries those. Not a check:
+    # it changes the moment the next session starts working, by design.
+    diff_stat = _git(cwd, "diff", "--shortstat", "HEAD")
+    if diff_stat is not UNMEASURED:
+        diff_stat = diff_stat.strip()
+
     calls = UNMEASURED
+    last_cmd = last_failed = UNMEASURED
     if transcript:
-        from .transcript import recent_calls
+        from .transcript import last_command, recent_calls
         found = recent_calls(transcript)
         if found is not None:
             calls = found
+        last = last_command(transcript)
+        if last is not None:
+            last_cmd = last["hint"]
+            if last["failed"] is not None:
+                last_failed = last["failed"]
 
     used = resets = label = others = UNMEASURED
     if window:
@@ -130,7 +143,8 @@ def observe(cwd=None, transcript=None, window=None, session_started=None,
 
     return Observed(
         cwd=where, branch=branch, agent=agent, guides=guides,
-        head=head, head_subject=subject, dirty=dirty,
+        head=head, head_subject=subject, dirty=dirty, diff_stat=diff_stat,
+        last_command=last_cmd, last_failed=last_failed,
         calls=calls, window_used_percent=used, window_resets_at=resets,
         window_label=label, window_also=others,
         started_at=session_started if session_started else UNMEASURED,

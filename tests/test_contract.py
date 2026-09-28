@@ -38,7 +38,7 @@ def _full():
         session="proj",
         observed=Observed(head="7f3a91c", head_subject="wip: lock around refresh",
                           dirty=("src/auth/session.py",), last_command="pytest -x",
-                          last_exit=1, written_at="2026-09-02 15:51"),
+                          last_failed=True, written_at="2026-09-02 15:51"),
         declared=Declared(task="Fix the token-refresh race.",
                           decided=("Lock around refresh, not the request path.",),
                           ruled_out=("Optimistic versioning: needs a migration.",),

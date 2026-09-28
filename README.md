@@ -14,7 +14,7 @@ the work instead of reconstructing it. On another account, or another model.
 pip install dimissory
 ```
 
-> **Status: early, `0.0.9`.** The brief format, the trust contract, the verify
+> **Status: early, `0.0.10`.** The brief format, the trust contract, the verify
 > mechanism, the agent hooks, the plan-window meter and the pickup on the
 > receiving side all work and are tested — green from a bare checkout with
 > nothing installed. Two vendors need a second step before anything is
@@ -113,6 +113,9 @@ This is the loop the tool exists for, end to end, with nothing typed twice:
    declare as it goes: what the task is, what it has done, what it decided,
    what it ruled out, what it learned about the codebase, and the exact next
    action. Each is one `dim declare` call, and the agent runs them itself.
+   After each commit the hook asks once for `--done`, and `dim declare`
+   refuses a pasted placeholder, a one-word next action, or a next action
+   that just restates the task.
 2. **The five-hour cap approaches.** At 85% of the window (`dim meter` shows
    it; `write_at` sets it) the hook seals a letter into `~/.dimissory/letters`.
    It records the directory, the branch, the commit, the dirty paths, which
@@ -162,8 +165,11 @@ dim pickup path/to.md     # a specific one, wherever it came from
 |---|---|
 | Brief model and trust contract | working, 32 checks |
 | Markdown renderer | working |
-| Observed block — git, branch, dirty paths, directory, guide files | working |
+| Observed block — git, branch, dirty paths, diff size, directory, guide files | working |
+| Observed block — last shell command and whether the host flagged it failed | working, Claude Code transcripts |
 | Declared block — task, done, decided, ruled out, learned, next, constraints | working |
+| Quality floor on `dim declare` — placeholders, bare words, next = task refused | working |
+| Nudge to record `--done` after a commit | working, Claude Code payloads; others untested |
 | Verify block — derive, render, compare, fail | working |
 | Transcript reading — bounded tail, hashed args | working |
 | Agent hooks — install, ask, gate | working, all three CLIs |
@@ -173,9 +179,10 @@ dim pickup path/to.md     # a specific one, wherever it came from
 | **Pickup — the next session in the directory is handed the letter, verified** | working, Claude and Codex; Grok by hand |
 | `dim pickup`, `dim resume` scoped to the directory you are in | working |
 | `dim status` | working |
-| Observed block — last command and exit code | not yet |
+| Exit codes | not claimed: no transcript measured carries one |
 | One letter per session unless something changed | working |
-| Pruning old letters (`letters.keep`) | not yet, setting is inert |
+| Pruning old letters (`letters.keep`) | working; 0 or less keeps everything |
+| `agents.<name> = false` silences that agent's installed hook | working |
 | Codex hooks | installed, but inert until Codex trusts them |
 | Delivery to another machine | by hand: `dim show`, paste the letter |
 
@@ -296,6 +303,7 @@ python3 tests/test_setup_and_config.py  # setup, settings, and the -c flag
 python3 tests/test_declared_floor.py    # the Python version we claim to support
 python3 tests/test_verify_can_fail.py   # the verify block detects a moved world
 python3 tests/test_pickup.py            # the next session is handed the letter
+python3 tests/test_handoff_quality.py   # what goes into the letter, and honest settings
 ```
 
 No dependencies and no test runner. Requires Python 3.11+ (`tomllib`).

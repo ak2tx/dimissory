@@ -84,8 +84,14 @@ class Observed:
     head: object = UNMEASURED            # git commit, short
     head_subject: object = UNMEASURED
     dirty: object = UNMEASURED           # tuple[str, ...] of paths
+    # `git diff --shortstat HEAD`: how much uncommitted work there is, in the
+    # words git uses. An empty string is a MEASURED "nothing changed".
+    diff_stat: object = UNMEASURED
+    # The last shell command the session ran (a one-line hint, never the
+    # arguments) and whether the host flagged its result as an error. The
+    # exit code is not in any transcript measured, so it is not claimed.
     last_command: object = UNMEASURED
-    last_exit: object = UNMEASURED
+    last_failed: object = UNMEASURED     # bool
     calls: object = UNMEASURED           # tuple[Call, ...] from the transcript
     window_used_percent: object = UNMEASURED
     window_resets_at: object = UNMEASURED

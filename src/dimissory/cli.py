@@ -111,7 +111,9 @@ def cmd_write(args):
     )
     d = _letters_dir(args)
     from . import letters as _L
-    path = _L.write(d, brief.session, render(brief))
+    path = _L.write(d, brief.session, render(brief),
+                    keep=Config.load(getattr(args, "config", None))
+                    .get("letters", "keep"))
     if path is None:
         print(f"could not write a letter into {d}", file=sys.stderr)
         return 1
@@ -242,19 +244,80 @@ def cmd_pickup(args):
     return cmd_resume(args, show=True)
 
 
+_FLAG = {"task": "--task", "next": "--next", "done": "--done",
+         "decided": "--decided", "ruled_out": "--ruled-out",
+         "learned": "--learned", "constraint": "--constraint",
+         "revoke": "--revoke"}
+
+
+def _unusable(field, value, task=None):
+    """Why a declaration is not worth recording, or None.
+
+    A quality floor, and a low one. The declared half is the weakest link
+    in every letter -- a tired agent writing about its own reasoning -- and
+    the two failures that make it worthless are cheap to refuse at the
+    door:
+
+      the placeholder    the ask shows `--task "<one line: what this session
+                         is for>"`, and an agent in a hurry pastes it
+                         verbatim. Recorded, that reads as a task.
+      a bare word        `--next "fix"` is not a next action anyone can
+                         take, and `--next` equal to the task is the goal
+                         restated, not the step.
+
+    Refused with a one-line reason, the way an empty declaration already
+    is, because the reader of that line is a machine that will act on it.
+    Nothing here judges whether the content is TRUE; only whether it is a
+    declaration at all.
+    """
+    v = (value or "").strip()
+    if v.startswith("<") and v.endswith(">"):
+        return "is the placeholder from the ask, not filled in"
+    if field in ("task", "next") and len(v.split()) < 3:
+        return "is too short to act on (fewer than three words)"
+    if field == "next" and task and v.lower() == task.strip().lower():
+        return "repeats the task; a next action is the step, not the goal"
+    return None
+
+
 def cmd_declare(args):
     """Record what the agent knows, while it still has budget to know it."""
     from . import journal as _J
     session = args.session or os.path.basename(os.getcwd()) or "session"
+    given = (("task", [args.task] if args.task else []),
+             ("next", [args.next] if args.next else []),
+             ("done", args.done or []),
+             ("decided", args.decided or []),
+             ("ruled_out", args.ruled_out or []),
+             ("learned", args.learned or []),
+             ("constraint", args.constraint or []),
+             (_J.REVOKE, args.revoke or []))
+
+    # Every value is judged BEFORE any is written, so a refusal never leaves
+    # half a declaration behind. The task a `--next` is compared against is
+    # the one given now, else the one already in the journal.
+    task = args.task
+    if task is None:
+        try:
+            task = _J.read(session, args.journal)[0].get("task")
+        except (_J.JournalError, OSError):
+            task = None
+    problems = []
+    for field, values in given:
+        if field == _J.REVOKE:
+            continue
+        for v in values:
+            why = _unusable(field, v, task=task)
+            if why:
+                problems.append(f"{_FLAG[field]} {v!r} {why}.")
+    if problems:
+        for line in problems:
+            print(f"dim declare: {line}", file=sys.stderr)
+        print("dim declare: nothing was recorded.", file=sys.stderr)
+        return 1
+
     wrote = []
-    for field, values in (("task", [args.task] if args.task else []),
-                          ("next", [args.next] if args.next else []),
-                          ("done", args.done or []),
-                          ("decided", args.decided or []),
-                          ("ruled_out", args.ruled_out or []),
-                          ("learned", args.learned or []),
-                          ("constraint", args.constraint or []),
-                          (_J.REVOKE, args.revoke or [])):
+    for field, values in given:
         for v in values:
             try:
                 _J.declare(session, field, v, root=args.journal)

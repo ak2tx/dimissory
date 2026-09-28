@@ -75,9 +75,17 @@ def _lines(observed) -> list:
     if "dirty" in k:
         paths = k["dirty"]
         out.append(f"dirty       {', '.join(paths) if paths else '(clean)'}")
+    if "diff_stat" in k and k["diff_stat"]:
+        # Omitted when empty: `dirty (clean)` already says so, and a second
+        # "nothing" line reads as a finding.
+        out.append(f"changes     {k['diff_stat']}")
     if "last_command" in k:
-        exit_ = k.get("last_exit")
-        tail = f"  -> exit {exit_}" if exit_ is not None else ""
+        # The host's error flag, not an exit code -- no transcript carries
+        # one, and "exit 0" nobody measured is the line this project is
+        # named against. A command still in flight gets no verdict.
+        tail = ""
+        if "last_failed" in k:
+            tail = "  -> FAILED" if k["last_failed"] else "  -> ok"
         out.append(f"last cmd    {k['last_command']}{tail}")
     if "calls" in k:
         calls = k["calls"]
